@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SalesLab AI | Operations</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Dependências Estáticas -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- Sidebar Navigation -->
+        <nav class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="brand">
+                    <i class="ri-hexagon-fill"></i>
+                    <span>SalesLab <b>Ops</b></span>
+                </div>
+                <button class="mobile-close" id="mobile-close"><i class="ri-close-line"></i></button>
+            </div>
+
+            <div class="sidebar-menu">
+                <span class="menu-label">Módulos Ativos</span>
+                <a href="#" class="nav-link active"><i class="ri-dashboard-3-line"></i> Dashboard SOPI</a>
+                
+                <span class="menu-label mt-4">Futuros Upgrades</span>
+                <a href="#" class="nav-link disabled">
+                    <i class="ri-funds-line"></i> DRE Financeiro
+                    <span class="badge-soon">Em breve</span>
+                </a>
+                <a href="#" class="nav-link disabled">
+                    <i class="ri-brain-line"></i> Análise Preditiva
+                    <span class="badge-soon">Em breve</span>
+                </a>
+                <a href="#" class="nav-link disabled">
+                    <i class="ri-map-pin-2-line"></i> Rotas e Tracking
+                    <span class="badge-soon">Em breve</span>
+                </a>
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="user-profile">
+                    <div class="avatar">JN</div>
+                    <div class="user-details">
+                        <strong>João Neto</strong>
+                        <span>Nível de Serviço</span>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main Workspace -->
+        <main class="workspace">
+            <!-- Topbar -->
+            <header class="topbar">
+                <div class="topbar-left">
+                    <button class="mobile-toggle" id="mobile-toggle"><i class="ri-menu-2-line"></i></button>
+                    <div class="search-box">
+                        <i class="ri-search-2-line"></i>
+                        <input type="text" id="pdvSearch" placeholder="Importe a base Mestre para buscar um PDV..." disabled autocomplete="off">
+                        <button id="clearSearch" class="hidden"><i class="ri-close-circle-fill"></i></button>
+                    </div>
+                </div>
+
+                <div class="topbar-right">
+                    <button class="theme-toggle" id="theme-toggle" aria-label="Mudar Tema">
+                        <i class="ri-moon-line"></i>
+                    </button>
+                    <div class="divider"></div>
+                    <button class="upload-btn" onclick="document.getElementById('excelFileInput').click()">
+                        <i class="ri-file-excel-2-line"></i> Importar Base (.xlsm)
+                    </button>
+                    <input type="file" id="excelFileInput" accept=".xlsx, .xlsm, .xls" class="hidden">
+                </div>
+            </header>
+
+            <!-- Dashboard Content -->
+            <div class="dashboard-content">
+                <div class="page-header">
+                    <div>
+                        <h2>Visibilidade SKU/PDV</h2>
+                        <p>Acompanhamento de equipamentos SOPI instalados.</p>
+                    </div>
+                    <div class="status-indicator" id="system-status">
+                        <span class="pulse-dot red"></span> Aguardando Base de Dados
+                    </div>
+                </div>
+
+                <!-- Main Bento Grid -->
+                <div class="bento-grid hidden" id="main-grid">
+                    
+                    <!-- AI Insight / Status Geral -->
+                    <article class="bento-card col-span-8 ai-card">
+                        <div class="ai-header">
+                            <i class="ri-sparkling-fill"></i> Insight Operacional
+                        </div>
+                        <div class="ai-body">
+                            <p id="ai-text">Sistema pronto. Digite o código de um PDV na barra de pesquisa superior para gerar a análise cruzada de performance e evolução de SKUs.</p>
+                        </div>
+                    </article>
+
+                    <!-- Profile PDV -->
+                    <article class="bento-card col-span-4 profile-card">
+                        <div class="pdv-header">
+                            <h3 id="pdv-title">Nenhum PDV</h3>
+                            <span class="pdv-badge" id="pdv-id-display">---</span>
+                        </div>
+                        <div class="pdv-details">
+                            <div class="detail-row">
+                                <span>Setor Responsável</span>
+                                <strong id="det-setor">---</strong>
+                            </div>
+                            <div class="detail-row">
+                                <span>Status SKU</span>
+                                <strong id="det-status">---</strong>
+                            </div>
+                            <div class="detail-row">
+                                <span>Faltantes (GAP)</span>
+                                <strong id="det-gap">---</strong>
+                            </div>
+                        </div>
+                        <button class="action-btn w-full mt-4" id="btn-cobrar" style="display: none;">
+                            <i class="ri-whatsapp-line"></i> Notificar Representante
+                        </button>
+                    </article>
+
+                    <!-- Chart Evolução -->
+                    <article class="bento-card col-span-12 chart-card">
+                        <div class="card-title">
+                            <h3>Curva de Evolução (6 Meses)</h3>
+                            <span class="badge-soft">Simulação Baseada em Meta</span>
+                        </div>
+                        <div class="chart-wrapper">
+                            <canvas id="evolutionChart"></canvas>
+                        </div>
+                    </article>
+
+                </div>
+
+                <!-- Empty State Inicial -->
+                <div class="empty-workspace" id="empty-workspace">
+                    <div class="empty-icon"><i class="ri-bar-chart-box-line"></i></div>
+                    <h3>Workspace Pronto</h3>
+                    <p>Importe a base operacional extraída do BI (ficheiro .xlsm de 26MB) no botão superior direito para começar.</p>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay hidden">
+        <div class="loader-content">
+            <i class="ri-loader-4-line ri-spin"></i>
+            <h2>Processando Base de Dados</h2>
+            <p>Descodificando planilhas em memória RAM...</p>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
