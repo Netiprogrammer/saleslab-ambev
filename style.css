@@ -47,15 +47,17 @@ body { background-color: var(--bg-app); color: var(--text-main); height: 100vh; 
 .sidebar-menu { padding: 1.5rem 1rem; display: flex; flex-direction: column; gap: 0.5rem; flex: 1; }
 .menu-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; margin: 1rem 0 0.5rem 0.5rem; }
 .nav-link { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem; color: var(--text-muted); text-decoration: none; border-radius: 8px; font-weight: 500; font-size: 0.9rem; transition: 0.2s; cursor: pointer; }
-.nav-link:hover { background-color: var(--border); color: var(--text-main); }
+.nav-link:hover:not(.disabled) { background-color: var(--border); color: var(--text-main); }
 .nav-link.active { background-color: var(--primary); color: white; }
+.nav-link.disabled { opacity: 0.6; cursor: not-allowed; justify-content: space-between; }
+.badge-soon { background: var(--border); color: var(--text-muted); font-size: 0.65rem; padding: 0.2rem 0.5rem; border-radius: 99px; }
 .sidebar-footer { padding: 1.5rem; border-top: 1px solid var(--border); }
 .user-profile { display: flex; align-items: center; gap: 0.75rem; }
 .avatar { width: 40px; height: 40px; border-radius: 50%; background: var(--primary); color: white; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; }
 .user-details strong { display: block; font-size: 0.9rem; color: var(--text-main); }
 .user-details span { font-size: 0.75rem; color: var(--text-muted); }
 
-/* Workspace */
+/* Workspace & Topbar */
 .workspace { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .topbar { height: 70px; background-color: var(--bg-panel); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; padding: 0 2rem; }
 .topbar-left h2 { font-size: 1.25rem; font-weight: 700; color: var(--text-main); }
