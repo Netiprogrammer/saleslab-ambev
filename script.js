@@ -24,7 +24,9 @@ function updateThemeIcon(theme) {
     themeToggle.querySelector('i').className = theme === 'light' ? 'ri-moon-line' : 'ri-sun-line';
 }
 
+let workbookGlobal = null;
 let rawDataPDVs = [];
+let rawDataGerencial = [];
 let modoAtual = 'gerencial';
 let chartInstance = null;
 
@@ -33,7 +35,7 @@ const fileStatus = document.getElementById('file-status');
 const tableSearch = document.getElementById('tableSearch');
 const toolbarSearch = document.getElementById('toolbar-search');
 
-// Leitura Segura do Excel Mestre (Client-Side Memory Parser)
+// Leitura Segura do Excel Mestre (.xlsm de 26MB) via SheetJS
 document.getElementById('excelFileInput').addEventListener('change', function(e) {
     const file = e.target.files[0];
     if (!file) return;
@@ -44,17 +46,26 @@ document.getElementById('excelFileInput').addEventListener('change', function(e)
     reader.onload = function(e) {
         try {
             const data = new Uint8Array(e.target.result);
-            const workbook = XLSX.read(data, {type: 'array'});
+            workbookGlobal = XLSX.read(data, {type: 'array'});
             
-            // Varre dinamicamente procurando a aba de equipamentos
-            let targetSheet = workbook.SheetNames.find(n => n.toUpperCase().includes('BI') || n.toUpperCase().includes('PDV') || n.toUpperCase().includes('EQUIPAMENTOS')) || workbook.SheetNames[0];
-            
-            rawDataPDVs = XLSX.utils.sheet_to_json(workbook.Sheets[targetSheet], { defval: "" });
+            // 1. Extrai dados analíticos de PDVs (Procura aba de BI de Equipamentos ou Visibilidade)
+            let abaPDVs = workbookGlobal.SheetNames.find(n => {
+                const u = n.toUpperCase();
+                return u.includes('BI DE EQUIPAMENTOS') || u.includes('VISIBILIDADE') || u.includes('SKU-PDV');
+            }) || workbookGlobal.SheetNames[0];
+
+            rawDataPDVs = XLSX.utils.sheet_to_json(workbookGlobal.Sheets[abaPDVs], { defval: "" });
+
+            // 2. Extrai dados da Visão Gerencial se existir
+            let abaGerencial = workbookGlobal.SheetNames.find(n => n.toUpperCase().includes('VISÃO GERENCIAL') || n.toUpperCase().includes('VISAOGERENCIAL'));
+            if (abaGerencial) {
+                rawDataGerencial = XLSX.utils.sheet_to_json(workbookGlobal.Sheets[abaGerencial], { defval: "" });
+            }
 
             loadingOverlay.classList.add('hidden');
-            fileStatus.innerHTML = `<span class="dot green"></span> Pipeline Ativo (${rawDataPDVs.length} rows)`;
+            fileStatus.innerHTML = `<span class="dot green"></span> Pipeline Ativo (${rawDataPDVs.length} registos)`;
 
-            calcularKPIs(rawDataPDVs);
+            calcularKPIsGlobais(rawDataPDVs);
             mudarVisao('gerencial');
 
         } catch (error) {
@@ -66,15 +77,29 @@ document.getElementById('excelFileInput').addEventListener('change', function(e)
     reader.readAsArrayBuffer(file);
 });
 
-function calcularKPIs(data) {
+// Auto-detector inteligente de colunas (Fuzzy matching para ignorar quebras de linha no Excel)
+function extrairColuna(row, keywords) {
+    const keys = Object.keys(row);
+    for (const key of keys) {
+        const cleanKey = key.replace(/[\n\r\s]+/g, '').toUpperCase();
+        for (const kw of keywords) {
+            if (cleanKey.includes(kw.toUpperCase())) {
+                return row[key];
+            }
+        }
+    }
+    return '';
+}
+
+function calcularKPIsGlobais(data) {
     let total = data.length;
     let okCount = 0, vzCount = 0, gapCount = 0;
 
     data.forEach(r => {
-        const status = String(r['Status \nPDV'] || r['Status PDV'] || r['Status SKU'] || r['Status do\nPDV'] || '').toUpperCase();
-        if (status.includes('OK') || status.includes('BATEU') || status.includes('OVER')) okCount++;
+        const status = String(extrairColuna(r, ['STATUS', 'GIRO', 'SITUAÇÃO'])).toUpperCase();
+        if (status.includes('OK') || status.includes('BATEU') || status.includes('OVER') || status.includes('GIRO OK')) okCount++;
         if (status.includes('VENDA ZERO') || status.includes('NOK')) vzCount++;
-        if (status.includes('GAP')) gapCount++;
+        if (status.includes('GAP') || status.includes('FALTAM')) gapCount++;
     });
 
     document.getElementById('kpi-total').innerText = total.toLocaleString('pt-BR');
@@ -102,7 +127,7 @@ function mudarVisao(tipo, event) {
     }
 }
 
-// Agrupamento vetorial por Setor (In-Memory Aggregation)
+// Agrupamento vetorial por Setor com base na base de PDV
 function renderizarVisaoSetorial() {
     const thead = document.getElementById('tableHead');
     const tbody = document.getElementById('tableBody');
@@ -110,30 +135,35 @@ function renderizarVisaoSetorial() {
     thead.innerHTML = `
         <tr>
             <th>Setor</th>
-            <th>Responsável</th>
-            <th>Equipamentos</th>
-            <th>Giro OK</th>
-            <th>Atingimento</th>
+            <th>Representante / Dono</th>
+            <th>TT Equipamentos</th>
+            <th>TT Giro OK</th>
+            <th>Atingimento (%)</th>
             <th class="text-right">GAP Operacional</th>
         </tr>
     `;
     tbody.innerHTML = '';
 
     if (rawDataPDVs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="empty-state"><p>Nenhum dado carregado na memória.</p></td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="empty-state"><p>Nenhum dado carregado na memória RAM.</p></td></tr>`;
         return;
     }
 
     let setoresMap = {};
     rawDataPDVs.forEach(r => {
-        const setor = String(r['Setor'] || r['GV'] || r['Cod. Setor'] || 'Geral');
-        const dono = String(r['Supercom'] || r['Comercial'] || r['Representante \nde vendas'] || 'Equipe');
-        const status = String(r['Status \nPDV'] || r['Status PDV'] || '').toUpperCase();
+        const setor = String(extrairColuna(r, ['SETOR', 'GV', 'COD.SETOR']) || 'Geral').trim();
+        const dono = String(extrairColuna(r, ['SUPERCOM', 'COMERCIAL', 'REPRESENTANTE', 'DONO', 'RN']) || 'Equipe').trim();
+        const statusVal = String(extrairColuna(r, ['STATUS', 'GIRO'])).toUpperCase();
 
         if (!setoresMap[setor]) setoresMap[setor] = { dono, equip: 0, ok: 0, gap: 0 };
         setoresMap[setor].equip++;
-        if (status.includes('OK') || status.includes('OVER')) setoresMap[setor].ok++;
-        if (status.includes('GAP')) setoresMap[setor].gap++;
+        
+        if (statusVal.includes('OK') || statusVal.includes('OVER') || statusVal.includes('GIRO OK')) {
+            setoresMap[setor].ok++;
+        }
+        if (statusVal.includes('GAP') || statusVal.includes('FALTAM')) {
+            setoresMap[setor].gap++;
+        }
     });
 
     const fragment = document.createDocumentFragment();
@@ -173,14 +203,16 @@ function renderizarTabelaPDVs(data) {
     const fragment = document.createDocumentFragment();
 
     sliceData.forEach(r => {
-        const pdv = escapeHTML(r['PDV'] || r['Cód. PDV'] || '---');
-        const nome = escapeHTML(r['Nome Fantasia'] || r['Razão'] || '---');
-        const setor = escapeHTML(r['Setor'] || r['GV'] || '---');
-        const statusPDV = escapeHTML(String(r['Status \nPDV'] || r['Status PDV'] || 'Normal'));
-        const statusSKU = escapeHTML(String(r['Status SKU'] || r['Status/SKU'] || 'OK'));
+        const pdv = escapeHTML(extrairColuna(r, ['PDV', 'CÓD', 'CLIENTE']) || '---');
+        const nome = escapeHTML(extrairColuna(r, ['NOME', 'FANTASIA', 'RAZÃO']) || '---');
+        const setor = escapeHTML(extrairColuna(r, ['SETOR', 'GV']) || '---');
+        const statusPDV = escapeHTML(String(extrairColuna(r, ['STATUS PDV', 'STATUS DO PDV', 'STATUS']) || 'Normal'));
+        const statusSKU = escapeHTML(String(extrairColuna(r, ['STATUS SKU', 'STATUS/SKU', 'SKU']) || 'OK'));
 
         let badgeClass = 'ok';
-        if (statusPDV.toUpperCase().includes('GAP') || statusSKU.toUpperCase().includes('GAP')) badgeClass = 'danger';
+        if (statusPDV.toUpperCase().includes('GAP') || statusSKU.toUpperCase().includes('GAP') || statusPDV.toUpperCase().includes('NOK')) {
+            badgeClass = 'danger';
+        }
 
         const tr = document.createElement('tr');
         tr.innerHTML = `
@@ -202,21 +234,21 @@ tableSearch.addEventListener('input', (e) => {
     if (modoAtual !== 'pdvs') return;
     const term = e.target.value.toLowerCase();
     const filtered = rawDataPDVs.filter(r => {
-        const pdv = String(r['PDV'] || r['Cód. PDV'] || '');
-        const nome = String(r['Nome Fantasia'] || r['Razão'] || '').toLowerCase();
+        const pdv = String(extrairColuna(r, ['PDV', 'CÓD'])).toLowerCase();
+        const nome = String(extrairColuna(r, ['NOME', 'FANTASIA', 'RAZÃO'])).toLowerCase();
         return pdv.includes(term) || nome.includes(term);
     });
     renderizarTabelaPDVs(filtered);
 });
 
 function selecionarPDV(r) {
-    const pdv = escapeHTML(r['PDV'] || r['Cód. PDV'] || '---');
-    const nome = escapeHTML(r['Nome Fantasia'] || r['Razão'] || '---');
-    const setor = escapeHTML(r['Setor'] || r['GV'] || '---');
-    const status = escapeHTML(String(r['Status \nPDV'] || r['Status PDV'] || 'OK'));
+    const pdv = escapeHTML(extrairColuna(r, ['PDV', 'CÓD']) || '---');
+    const nome = escapeHTML(extrairColuna(r, ['NOME', 'FANTASIA', 'RAZÃO']) || '---');
+    const setor = escapeHTML(extrairColuna(r, ['SETOR', 'GV']) || '---');
+    const status = escapeHTML(String(extrairColuna(r, ['STATUS']) || 'OK'));
     
-    const fatEsperado = r['Faturamento Esperado\nSOPI'] || r['Faturamento Esperado'] || 'R$ 0,00';
-    const fatPDV = r['Faturamento PDV\nSOPI'] || r['Faturamento PDV'] || 'R$ 0,00';
+    const fatEsperado = extrairColuna(r, ['FATURAMENTO ESPERADO', 'ESPERADO']) || 'R$ 0,00';
+    const fatPDV = extrairColuna(r, ['FATURAMENTO PDV', 'REAL']) || 'R$ 0,00';
 
     document.getElementById('det-id').innerText = `PDV: ${pdv}`;
     document.getElementById('det-content').innerHTML = `
@@ -239,10 +271,5 @@ function selecionarPDV(r) {
 function copiarPautaTeams(pdv, nome, setor) {
     const texto = `*[Pauta Operacional SOPI]* \nOlá! Verificação necessária no PDV ${pdv} - ${nome} (Setor ${setor}). Constatada inaderência nos indicadores de sortimento.`;
     navigator.clipboard.writeText(texto);
-    alert("Pauta de cobrança copiada para a área de transferência! Cole diretamente no Teams do RN.");
-}
-
-function limparCacheLocal() {
-    localStorage.clear();
-    location.reload();
+    alert("Pauta copiada para a área de transferência com sucesso!");
 }
