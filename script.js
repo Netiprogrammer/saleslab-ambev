@@ -1,4 +1,3 @@
-// Prevenção XSS
 const escapeHTML = (str) => {
     if (!str) return '';
     return str.toString().replace(/[&<>'"]/g, 
@@ -6,11 +5,10 @@ const escapeHTML = (str) => {
     );
 };
 
-// Gerenciamento de Tema (Light/Dark) com localStorage
+// Gerenciamento de Tema
 const themeToggle = document.getElementById('theme-toggle');
 const rootElement = document.documentElement;
-
-const currentTheme = localStorage.getItem('theme') || 'light';
+const currentTheme = localStorage.getItem('theme') || 'dark';
 rootElement.setAttribute('data-theme', currentTheme);
 updateThemeIcon(currentTheme);
 
@@ -19,42 +17,26 @@ themeToggle.addEventListener('click', () => {
     rootElement.setAttribute('data-theme', newTheme);
     localStorage.setItem('theme', newTheme);
     updateThemeIcon(newTheme);
-    if(chartInstance) chartInstance.update(); // Atualiza cores do gráfico
+    if(chartInstance) chartInstance.update();
 });
 
 function updateThemeIcon(theme) {
-    const icon = themeToggle.querySelector('i');
-    icon.className = theme === 'light' ? 'ri-moon-line' : 'ri-sun-line';
+    themeToggle.querySelector('i').className = theme === 'light' ? 'ri-moon-line' : 'ri-sun-line';
 }
 
-// Mobile Menu Toggle
-document.getElementById('mobile-toggle').addEventListener('click', () => {
-    document.getElementById('sidebar').classList.add('open');
-});
-document.getElementById('mobile-close').addEventListener('click', () => {
-    document.getElementById('sidebar').classList.remove('open');
-});
-
-// Banco de Dados em Memória
-let baseOperacional = [];
+let rawDataPDVs = [];
+let modoAtual = 'gerencial';
 let chartInstance = null;
 
-const searchInput = document.getElementById('pdvSearch');
-const clearBtn = document.getElementById('clearSearch');
-const loadingOverlay = document.getElementById('loading-overlay');
-const systemStatus = document.getElementById('system-status');
-const emptyWorkspace = document.getElementById('empty-workspace');
-const mainGrid = document.getElementById('main-grid');
+const loadingOverlay = document.getElementById('loadingOverlay');
+const fileStatus = document.getElementById('file-status');
+const tableSearch = document.getElementById('tableSearch');
+const toolbarSearch = document.getElementById('toolbar-search');
 
-// Leitura do Ficheiro Excel (.xlsm / .xlsx)
+// Leitura Segura do Excel Mestre (Client-Side Memory Parser)
 document.getElementById('excelFileInput').addEventListener('change', function(e) {
     const file = e.target.files[0];
     if (!file) return;
-
-    if (!file.name.toLowerCase().match(/\.(xlsx|xlsm|xls)$/)) {
-        alert("Aviso de Segurança: Formato inválido. Por favor, importe a base oficial do BI.");
-        return;
-    }
 
     loadingOverlay.classList.remove('hidden');
 
@@ -64,152 +46,203 @@ document.getElementById('excelFileInput').addEventListener('change', function(e)
             const data = new Uint8Array(e.target.result);
             const workbook = XLSX.read(data, {type: 'array'});
             
-            // Busca Inteligente de Aba
-            let abaPrincipal = workbook.SheetNames.find(nome => nome.includes('BI de Equipamentos') || nome.includes('SKU-PDV')) || workbook.SheetNames[0];
-
-            baseOperacional = XLSX.utils.sheet_to_json(workbook.Sheets[abaPrincipal], { defval: "" });
-
-            // UI Feedback
-            loadingOverlay.classList.add('hidden');
-            searchInput.disabled = false;
-            searchInput.placeholder = "Digite o código do PDV ou Razão Social...";
+            // Varre dinamicamente procurando a aba de equipamentos
+            let targetSheet = workbook.SheetNames.find(n => n.toUpperCase().includes('BI') || n.toUpperCase().includes('PDV') || n.toUpperCase().includes('EQUIPAMENTOS')) || workbook.SheetNames[0];
             
-            systemStatus.innerHTML = `<span class="pulse-dot green"></span> Base Ativa (${baseOperacional.length} registros)`;
-            emptyWorkspace.classList.remove('hidden');
-            emptyWorkspace.innerHTML = `<div class="empty-icon"><i class="ri-search-eye-line"></i></div><h3>Sistema Sincronizado</h3><p>Base lida com sucesso. Utilize a barra de pesquisa acima para analisar um PDV específico.</p>`;
+            rawDataPDVs = XLSX.utils.sheet_to_json(workbook.Sheets[targetSheet], { defval: "" });
 
-            searchInput.focus();
+            loadingOverlay.classList.add('hidden');
+            fileStatus.innerHTML = `<span class="dot green"></span> Pipeline Ativo (${rawDataPDVs.length} rows)`;
+
+            calcularKPIs(rawDataPDVs);
+            mudarVisao('gerencial');
 
         } catch (error) {
             loadingOverlay.classList.add('hidden');
-            alert("Erro na descodificação: O arquivo pode estar corrompido.");
+            alert("Erro crítico no Parsing Engine do Excel.");
             console.error(error);
         }
     };
     reader.readAsArrayBuffer(file);
 });
 
-// Mecanismo de Busca
-searchInput.addEventListener('input', (e) => {
-    const term = e.target.value.trim();
-    if (term.length > 0) {
-        clearBtn.classList.remove('hidden');
-    } else {
-        clearBtn.classList.add('hidden');
-        resetDashboard();
-    }
-});
+function calcularKPIs(data) {
+    let total = data.length;
+    let okCount = 0, vzCount = 0, gapCount = 0;
 
-searchInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') executarBuscaProfunda(searchInput.value.trim());
-});
-
-clearBtn.addEventListener('click', () => {
-    searchInput.value = '';
-    clearBtn.classList.add('hidden');
-    resetDashboard();
-});
-
-// Lógica Relacional e Atualização do DOM
-function executarBuscaProfunda(termoBusca) {
-    if (baseOperacional.length === 0) return;
-
-    const pdvEncontrado = baseOperacional.find(row => {
-        const pdvStr = String(row['PDV'] || row['Cód. PDV'] || row['Código Cliente'] || '');
-        const nomeStr = String(row['Nome Fantasia'] || row['Razão'] || row['Razao Social'] || '').toLowerCase();
-        return pdvStr === termoBusca || nomeStr.includes(termoBusca.toLowerCase());
+    data.forEach(r => {
+        const status = String(r['Status \nPDV'] || r['Status PDV'] || r['Status SKU'] || r['Status do\nPDV'] || '').toUpperCase();
+        if (status.includes('OK') || status.includes('BATEU') || status.includes('OVER')) okCount++;
+        if (status.includes('VENDA ZERO') || status.includes('NOK')) vzCount++;
+        if (status.includes('GAP')) gapCount++;
     });
 
-    if (!pdvEncontrado) {
-        alert("PDV não localizado na base ativa atual.");
+    document.getElementById('kpi-total').innerText = total.toLocaleString('pt-BR');
+    document.getElementById('kpi-ok').innerText = okCount.toLocaleString('pt-BR');
+    document.getElementById('kpi-vz').innerText = vzCount.toLocaleString('pt-BR');
+    document.getElementById('kpi-gap').innerText = gapCount.toLocaleString('pt-BR');
+}
+
+function mudarVisao(tipo, event) {
+    if(event) event.preventDefault();
+    modoAtual = tipo;
+
+    document.querySelectorAll('.sidebar-menu .nav-link').forEach(l => l.classList.remove('active'));
+
+    if (tipo === 'gerencial') {
+        document.getElementById('view-title').innerText = "Visão Gerencial Consolidada (Setores)";
+        toolbarSearch.style.display = 'none';
+        if(event) event.currentTarget.classList.add('active');
+        renderizarVisaoSetorial();
+    } else {
+        document.getElementById('view-title').innerText = "Auditoria Analítica de PDVs";
+        toolbarSearch.style.display = 'flex';
+        if(event) event.currentTarget.classList.add('active');
+        renderizarTabelaPDVs(rawDataPDVs);
+    }
+}
+
+// Agrupamento vetorial por Setor (In-Memory Aggregation)
+function renderizarVisaoSetorial() {
+    const thead = document.getElementById('tableHead');
+    const tbody = document.getElementById('tableBody');
+
+    thead.innerHTML = `
+        <tr>
+            <th>Setor</th>
+            <th>Responsável</th>
+            <th>Equipamentos</th>
+            <th>Giro OK</th>
+            <th>Atingimento</th>
+            <th class="text-right">GAP Operacional</th>
+        </tr>
+    `;
+    tbody.innerHTML = '';
+
+    if (rawDataPDVs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty-state"><p>Nenhum dado carregado na memória.</p></td></tr>`;
         return;
     }
 
-    renderizarPDV(pdvEncontrado);
-}
+    let setoresMap = {};
+    rawDataPDVs.forEach(r => {
+        const setor = String(r['Setor'] || r['GV'] || r['Cod. Setor'] || 'Geral');
+        const dono = String(r['Supercom'] || r['Comercial'] || r['Representante \nde vendas'] || 'Equipe');
+        const status = String(r['Status \nPDV'] || r['Status PDV'] || '').toUpperCase();
 
-function renderizarPDV(dados) {
-    emptyWorkspace.classList.add('hidden');
-    mainGrid.classList.remove('hidden');
-
-    const pdv = escapeHTML(dados['PDV'] || dados['Cód. PDV'] || dados['Código Cliente'] || '---');
-    const nome = escapeHTML(dados['Nome Fantasia'] || dados['Razão'] || dados['Razao Social'] || '---');
-    const setor = escapeHTML(dados['Setor'] || dados['Cod. Setor'] || dados['GV'] || '---');
-    const status = escapeHTML(String(dados['Status SKU'] || dados['Status PDV'] || dados['Status'] || 'OK').toUpperCase());
-    
-    let gapField = Object.keys(dados).find(k => k.toUpperCase().includes('GAP'));
-    const gap = parseInt(dados[gapField] || '0');
-    
-    const isGap = status.includes("GAP") || status.includes("NOK") || gap > 0;
-    const gapNum = isNaN(gap) ? 0 : Math.abs(gap);
-    const skuAtual = isGap ? Math.max(0, 10 - gapNum) : (10 + gapNum); 
-
-    // Update Profile Card
-    document.getElementById('pdv-id-display').innerText = pdv;
-    document.getElementById('pdv-title').innerText = nome.substring(0, 25) + (nome.length > 25 ? '...' : '');
-    document.getElementById('det-setor').innerText = `Setor ${setor}`;
-    document.getElementById('det-status').innerText = status;
-    document.getElementById('det-status').style.color = isGap ? 'var(--danger)' : 'var(--success)';
-    document.getElementById('det-gap').innerText = isGap ? `${gapNum} SKU(s)` : 'Meta Atingida';
-    
-    const btnCobrar = document.getElementById('btn-cobrar');
-    btnCobrar.style.display = isGap ? 'flex' : 'none';
-    btnCobrar.onclick = () => alert(`Integração: Rota do Setor ${setor} notificada sobre PDV ${pdv}.`);
-
-    // Update AI Card
-    const aiText = document.getElementById('ai-text');
-    if (isGap) {
-        aiText.innerHTML = `O cliente <strong>${nome}</strong> apresenta inaderência crítica. É necessária a positivação de <strong>${gapNum} SKUs</strong> para atingir o target de diversificação. Ação recomendada junto ao vendedor do Setor ${setor}.`;
-    } else {
-        aiText.innerHTML = `O cliente <strong>${nome}</strong> apresenta excelente saúde de sortimento. Nenhuma intervenção na geladeira SOPI é necessária no momento.`;
-    }
-
-    renderizarGraficoEvolucao(skuAtual);
-}
-
-function renderizarGraficoEvolucao(skuAtual) {
-    const ctx = document.getElementById('evolutionChart')?.getContext('2d');
-    if (!ctx) return;
-    if (chartInstance) chartInstance.destroy();
-
-    const mockHistory = [ Math.max(skuAtual - 3, 2), Math.max(skuAtual - 1, 3), skuAtual + 1, skuAtual - 2, skuAtual, skuAtual ];
-    const isDark = rootElement.getAttribute('data-theme') === 'dark';
-    const gridColor = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
-    const textColor = isDark ? '#9ca3af' : '#64748b';
-
-    chartInstance = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: ['M-5', 'M-4', 'M-3', 'M-2', 'M-1', 'Atual'],
-            datasets: [{
-                label: 'SKUs Comprados',
-                data: mockHistory,
-                borderColor: '#3b82f6',
-                backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                borderWidth: 2,
-                fill: true,
-                tension: 0.4
-            }, {
-                label: 'Meta (10)',
-                data: [10, 10, 10, 10, 10, 10],
-                borderColor: '#f59e0b',
-                borderDash: [5, 5],
-                pointRadius: 0
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: { legend: { display: false } },
-            scales: {
-                y: { beginAtZero: true, max: 15, grid: { color: gridColor }, ticks: { color: textColor } },
-                x: { grid: { display: false }, ticks: { color: textColor } }
-            }
-        }
+        if (!setoresMap[setor]) setoresMap[setor] = { dono, equip: 0, ok: 0, gap: 0 };
+        setoresMap[setor].equip++;
+        if (status.includes('OK') || status.includes('OVER')) setoresMap[setor].ok++;
+        if (status.includes('GAP')) setoresMap[setor].gap++;
     });
+
+    const fragment = document.createDocumentFragment();
+    for (const [setor, info] of Object.entries(setoresMap)) {
+        let meta = info.equip > 0 ? Math.round((info.ok / info.equip) * 100) : 0;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td><strong>Setor ${escapeHTML(setor)}</strong></td>
+            <td>${escapeHTML(info.dono)}</td>
+            <td>${info.equip}</td>
+            <td>${info.ok}</td>
+            <td><span style="color: ${meta >= 70 ? 'var(--success)' : 'var(--danger)'}; font-weight: bold;">${meta}%</span></td>
+            <td class="text-right"><span class="badge danger">${info.gap} PDVs</span></td>
+        `;
+        fragment.appendChild(tr);
+    }
+    tbody.appendChild(fragment);
 }
 
-function resetDashboard() {
-    mainGrid.classList.add('hidden');
-    emptyWorkspace.classList.remove('hidden');
+function renderizarTabelaPDVs(data) {
+    const thead = document.getElementById('tableHead');
+    const tbody = document.getElementById('tableBody');
+
+    thead.innerHTML = `
+        <tr>
+            <th>Cód. PDV</th>
+            <th>Nome Fantasia</th>
+            <th>Setor</th>
+            <th>Status PDV</th>
+            <th>Status SKU</th>
+            <th class="text-right">Ação</th>
+        </tr>
+    `;
+    tbody.innerHTML = '';
+
+    const sliceData = data.slice(0, 200);
+    const fragment = document.createDocumentFragment();
+
+    sliceData.forEach(r => {
+        const pdv = escapeHTML(r['PDV'] || r['Cód. PDV'] || '---');
+        const nome = escapeHTML(r['Nome Fantasia'] || r['Razão'] || '---');
+        const setor = escapeHTML(r['Setor'] || r['GV'] || '---');
+        const statusPDV = escapeHTML(String(r['Status \nPDV'] || r['Status PDV'] || 'Normal'));
+        const statusSKU = escapeHTML(String(r['Status SKU'] || r['Status/SKU'] || 'OK'));
+
+        let badgeClass = 'ok';
+        if (statusPDV.toUpperCase().includes('GAP') || statusSKU.toUpperCase().includes('GAP')) badgeClass = 'danger';
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td><strong>${pdv}</strong></td>
+            <td>${nome}</td>
+            <td>Setor ${setor}</td>
+            <td><span class="badge ${badgeClass}">${statusPDV}</span></td>
+            <td>${statusSKU}</td>
+            <td class="text-right">
+                <button class="action-sm" onclick='selecionarPDV(${JSON.stringify(r)})'>Auditar</button>
+            </td>
+        `;
+        fragment.appendChild(tr);
+    });
+    tbody.appendChild(fragment);
+}
+
+tableSearch.addEventListener('input', (e) => {
+    if (modoAtual !== 'pdvs') return;
+    const term = e.target.value.toLowerCase();
+    const filtered = rawDataPDVs.filter(r => {
+        const pdv = String(r['PDV'] || r['Cód. PDV'] || '');
+        const nome = String(r['Nome Fantasia'] || r['Razão'] || '').toLowerCase();
+        return pdv.includes(term) || nome.includes(term);
+    });
+    renderizarTabelaPDVs(filtered);
+});
+
+function selecionarPDV(r) {
+    const pdv = escapeHTML(r['PDV'] || r['Cód. PDV'] || '---');
+    const nome = escapeHTML(r['Nome Fantasia'] || r['Razão'] || '---');
+    const setor = escapeHTML(r['Setor'] || r['GV'] || '---');
+    const status = escapeHTML(String(r['Status \nPDV'] || r['Status PDV'] || 'OK'));
+    
+    const fatEsperado = r['Faturamento Esperado\nSOPI'] || r['Faturamento Esperado'] || 'R$ 0,00';
+    const fatPDV = r['Faturamento PDV\nSOPI'] || r['Faturamento PDV'] || 'R$ 0,00';
+
+    document.getElementById('det-id').innerText = `PDV: ${pdv}`;
+    document.getElementById('det-content').innerHTML = `
+        <div class="detail-row"><span>Cliente:</span> <strong>${nome}</strong></div>
+        <div class="detail-row"><span>Setor:</span> <strong>Setor ${setor}</strong></div>
+        <div class="detail-row"><span>Status:</span> <strong>${status}</strong></div>
+        <div class="detail-row"><span>Fat. Esperado:</span> <strong style="color: var(--warning);">${fatEsperado}</strong></div>
+        <div class="detail-row"><span>Fat. Real:</span> <strong style="color: var(--success);">${fatPDV}</strong></div>
+        <div class="mt-4">
+            <button class="action-sm w-full" style="background: var(--primary); color: white; border: none; padding: 0.5rem;" onclick="copiarPautaTeams('${pdv}', '${nome}', '${setor}')">
+                <i class="ri-clipboard-line"></i> Copiar Pauta p/ Teams
+            </button>
+        </div>
+    `;
+
+    document.getElementById('chartContainer').classList.remove('hidden');
+    renderizarGraficoLateral(8);
+}
+
+function copiarPautaTeams(pdv, nome, setor) {
+    const texto = `*[Pauta Operacional SOPI]* \nOlá! Verificação necessária no PDV ${pdv} - ${nome} (Setor ${setor}). Constatada inaderência nos indicadores de sortimento.`;
+    navigator.clipboard.writeText(texto);
+    alert("Pauta de cobrança copiada para a área de transferência! Cole diretamente no Teams do RN.");
+}
+
+function limparCacheLocal() {
+    localStorage.clear();
+    location.reload();
 }
