@@ -1,14 +1,8 @@
-# Planilhas com dados corporativos: nunca versionar
-*.xlsx
+# Nunca commitar a planilha real da Ambev (dados sensíveis / público no GitHub)
 *.xlsm
+*.xlsx
 *.xls
-*.csv
 
 # Sistema
 .DS_Store
 Thumbs.db
-desktop.ini
-
-# Editor
-.vscode/
-.idea/
