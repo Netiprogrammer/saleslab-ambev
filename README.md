@@ -1,45 +1,51 @@
-# SalesLab Ops: Central Executiva Ambev
+# SalesLab · Ambev — Command Center Operacional
 
-Painel operacional 100% estático (HTML + CSS + JS puro). O Excel é lido **na memória do navegador**: não há backend, banco de dados nem envio de arquivo para nenhum servidor.
+Painel operacional 100% client-side (HTML + CSS + Vanilla JS) para consolidar a base
+mestre de equipamentos/faturamento/status de SKUs por PDV. Não existe backend: o
+Excel é lido, processado e descartado inteiramente na memória do navegador. Pode ser
+hospedado direto no GitHub Pages.
 
-## Como usar
+## Rodando localmente
 
-1. Abra a página (GitHub Pages) e clique em **Carregar arquivo mestre**, ou arraste o `.xlsm`/`.xlsx`/`.xls` para a janela.
-2. **Visão gerencial**: agrupa por setor, com representante, equipamentos, Giro OK, atingimento (verde a partir da meta) e GAPs. Clique num setor para ver só os PDVs dele.
-3. **Auditoria de PDVs**: busca por código ou nome fantasia, filtro por status e 200 linhas por vez ("Mostrar mais" revela o resto).
-4. **Auditar** abre o Raio-X do PDV: dados do cliente, faturamento esperado x real, curva de cobertura e o botão **Copiar pauta de cobrança** (pronta para colar no Teams ou no WhatsApp).
-5. **Diagnóstico** (topo) mostra qual aba e qual linha de cabeçalho foram usadas, qual coluna virou cada campo e como cada valor de status foi classificado.
+Basta abrir `index.html` num servidor estático (ou usar a extensão "Live Server").
+Abrir via `file://` direto também funciona, mas alguns navegadores restringem
+`fetch`/Workers nesse modo — preferir sempre um servidor local ou o GitHub Pages.
 
-## Publicar no GitHub Pages
+## Rede corporativa restrita (sem CDN)
 
-`Settings > Pages > Build and deployment > Deploy from a branch > main / (root)`.
-
-## Funcionar em rede corporativa que bloqueia CDN
-
-O app carrega SheetJS e Chart.js primeiro da pasta `vendor/` e só depois da CDN. Baixe uma vez e faça commit da pasta:
+O app tenta carregar as bibliotecas de `vendor/` primeiro e só usa a CDN se o
+arquivo local não existir. Para deixar tudo 100% offline, baixe as duas libs uma
+vez e commite a pasta `vendor/`:
 
 ```powershell
-mkdir vendor
-Invoke-WebRequest https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js -OutFile vendor/xlsx.full.min.js
-Invoke-WebRequest https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.js -OutFile vendor/chart.umd.js
+New-Item -ItemType Directory -Force vendor | Out-Null
+Invoke-WebRequest -Uri "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js" -OutFile "vendor/xlsx.full.min.js"
+Invoke-WebRequest -Uri "https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" -OutFile "vendor/chart.umd.min.js"
 ```
 
-Ícones (Remixicon) e fonte (Inter) são opcionais: se forem bloqueados, o app funciona com a fonte do sistema e os botões continuam com texto.
+## Como o ETL lê a planilha
 
-## Como o Excel é lido
+1. **Seleção de aba**: procura por abas cujo nome contenha `BI DE EQUIPAMENTOS`,
+   `VISIBILIDADE` ou `SKU-PDV`; usa `VISÃO GERENCIAL` como apoio; senão, a primeira aba.
+2. **Cabeçalho inteligente**: varre as 15 primeiras linhas e usa a primeira que
+   contiver pelo menos duas das palavras `PDV`, `STATUS`, `SETOR` — ignora
+   linhas de título/data acima do cabeçalho real.
+3. **Fuzzy matching sem depender de ordem**: cada campo (PDV, Nome, Setor,
+   Responsável, Status Geral, Status SKU, Faturamento Real/Esperado) tem uma
+   lista de palavras-chave por prioridade. Todas as combinações campo×coluna são
+   pontuadas e a atribuição é feita globalmente (maior prioridade e match mais
+   específico vencem primeiro), então uma coluna como "Status PDV" não rouba a
+   coluna de código do PDV só por conter a substring "PDV".
+4. **Linha de TOTAL** é descartada automaticamente.
 
-- **Aba**: prefere a que tem "Visibilidade" ou "BI de Equipamentos" no nome; senão usa a primeira. Dá para trocar no Diagnóstico.
-- **Cabeçalho**: varre as 40 primeiras linhas e escolhe a que tem várias células de texto e termos como PDV, STATUS, SETOR, GAP. Linhas de título e de data (`DATA: 23/09/2026`) são puladas.
-- **Colunas**: os nomes são normalizados (sem acento, quebras de linha viram espaço) e cada campo procura o padrão mais específico primeiro, então a ordem das colunas no arquivo não importa. Se algo vier errado, escolha a coluna certa no Diagnóstico; a escolha fica salva no navegador.
-- **Status**: `NOK` nunca conta como `OK`. Para incluir outras palavras do BI, edite a lista `CLASSES` no topo do `script.js`.
-- Linhas de total do relatório são descartadas.
-
-## Privacidade
-
-O repositório é público. **Nunca faça commit das planilhas** (o `.gitignore` já bloqueia `.xlsx`, `.xlsm`, `.xls` e `.csv`). Todo texto vindo do Excel é escapado antes de ir para a tela.
+Se a detecção automática errar, use o botão **Diagnóstico** no cabeçalho: ele
+mostra qual coluna foi usada para cada campo e permite trocar manualmente — a
+escolha fica salva no navegador (`localStorage`) e é reaplicada em cargas futuras.
 
 ## Limitações conhecidas
 
-- A curva de cobertura do Raio-X é **simulada** (estável por PDV) e vem marcada como ilustrativa; ainda não usa histórico real.
-- Cabeçalhos de dois níveis (células mescladas em duas linhas) não são combinados.
-- Arquivo protegido por senha não é aberto; salve uma cópia sem senha.
+- O gráfico do Raio-X é **ilustrativo/simulado** (determinístico por PDV), não
+  reflete histórico real — não há coluna de série mensal mapeada ainda.
+- A tabela de Auditoria renderiza no máximo 200 linhas por vez (botão
+  "Mostrar mais" carrega mais) para não travar a DOM em bases grandes.
+- Arquivo público: **não commite planilhas reais** (veja `.gitignore`).
