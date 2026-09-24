@@ -2,70 +2,57 @@
 
 /**
  * SalesLab · Ambev — Command Center Operacional
- * ETL 100% client-side (SheetJS) + KPIs + Visão Gerencial + Auditoria de PDVs + Raio-X (Chart.js).
- * Nenhum dado sai do navegador: tudo é lido, processado e descartado em memória (RAM).
+ * Camada de UI: orquestra o Web Worker de ingestão (worker.js/etl.js), renderiza
+ * KPIs, Visão Gerencial, Auditoria de PDVs e o Raio-X (Chart.js). Nenhum dado sai
+ * do navegador — tudo é lido, processado e descartado em memória (RAM).
  */
 
-// ---------------------------------------------------------------------------
-// CONFIGURAÇÃO — regras de negócio centralizadas (fácil de ajustar via Diagnóstico)
-// ---------------------------------------------------------------------------
-const CONFIG = {
-  sheetKeywordsPrimary: ['BIDEEQUIPAMENTOS', 'VISIBILIDADE', 'SKUPDV'],
-  sheetKeywordsSupport: ['VISAOGERENCIAL'],
-  headerScanRows: 15,
-  headerKeywords: ['PDV', 'STATUS', 'SETOR'],
-  minHeaderKeywordMatches: 2,
+const APP_CONFIG = {
   renderChunkSize: 200,
-  // Prioridade das palavras-chave por campo (índice menor = mais prioritário).
-  fieldKeywords: {
-    pdv: ['PDV', 'COD', 'CLIENTE'],
-    nome: ['RAZAO', 'NOME', 'FANTASIA'],
-    setor: ['GV', 'SETOR', 'CODSETOR'],
-    responsavel: ['SUPERCOM', 'COMERCIAL', 'RN', 'DONO'],
-    statusGeral: ['STATUSPDV', 'STATUSDO', 'GIRO'],
-    statusSku: ['STATUSSKU', 'SKU'],
-    faturamentoReal: ['FATURAMENTOREAL', 'REAL'],
-    faturamentoEsperado: ['FATURAMENTOESPERADO', 'ESPERADO'],
-  },
   overridesStorageKey: 'saleslab_column_overrides',
   themeStorageKey: 'saleslab_theme',
+  kpiSnapshotStorageKey: 'saleslab_kpi_snapshot',
+};
+
+const ROTULOS_CAMPO = {
+  pdv: 'Código do PDV',
+  nome: 'Nome / Razão Social',
+  setor: 'Setor / GV',
+  responsavel: 'Responsável',
+  statusGeral: 'Status Geral (Giro)',
+  statusSku: 'Status SKU',
+  faturamentoReal: 'Faturamento Real',
+  faturamentoEsperado: 'Faturamento Esperado',
+};
+
+const ETAPAS_LOADING = {
+  lendo: 'Lendo o arquivo...',
+  'detectando-aba': 'Detectando a aba correta...',
+  'mapeando-colunas': 'Mapeando colunas e montando registros...',
+  'processando-linhas': null, // mensagem dinâmica (mostra progresso de linhas)
+  'calculando-indicadores': 'Calculando KPIs e agrupamentos por setor...',
 };
 
 // Estado global da aplicação (única fonte de verdade em memória).
 const state = {
   registros: [],
   pdvsFiltrados: [],
-  limiteRenderAuditoria: CONFIG.renderChunkSize,
+  limiteRenderAuditoria: APP_CONFIG.renderChunkSize,
   filtroSetor: null,
   registroAtivo: null,
   diagnostico: null,
   overrides: carregarOverrides(),
   chartInstance: null,
+  bufferAtual: null,
+  worker: null,
+  ordenacaoAuditoria: { campo: null, direcao: 1 },
+  pilhaFocusTrap: [], // suporta overlays aninhados (ex.: Raio-X aberto + modal de cópia manual por cima)
+  carregando: false,
 };
 
 // ---------------------------------------------------------------------------
-// UTILITÁRIOS
+// UTILITÁRIOS DE UI
 // ---------------------------------------------------------------------------
-
-/** Remove acentos, espaços, quebras de linha e pontuação; deixa tudo maiúsculo. */
-function normalizeKey(str) {
-  return String(str ?? '')
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/[^a-zA-Z0-9]/g, '')
-    .toUpperCase();
-}
-
-function parseNumero(valor) {
-  if (valor === undefined || valor === null || valor === '') return 0;
-  if (typeof valor === 'number') return valor;
-  const limpo = String(valor)
-    .replace(/[^\d,.-]/g, '')
-    .replace(/\.(?=\d{3}(\D|$))/g, '')
-    .replace(',', '.');
-  const numero = parseFloat(limpo);
-  return Number.isFinite(numero) ? numero : 0;
-}
 
 function formatMoeda(valor) {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valor || 0);
@@ -91,103 +78,9 @@ function getCssVar(nome) {
   return getComputedStyle(document.documentElement).getPropertyValue(nome).trim();
 }
 
-// ---------------------------------------------------------------------------
-// MOTOR DE INGESTÃO — seleção de aba, detecção de cabeçalho e fuzzy matching
-// ---------------------------------------------------------------------------
-
-function encontrarAbaAlvo(workbook) {
-  const nomes = workbook.SheetNames;
-  const normalizados = nomes.map(normalizeKey);
-  let idx = normalizados.findIndex((n) => CONFIG.sheetKeywordsPrimary.some((kw) => n.includes(kw)));
-  if (idx === -1) idx = normalizados.findIndex((n) => CONFIG.sheetKeywordsSupport.some((kw) => n.includes(kw)));
-  if (idx === -1) idx = 0;
-  return nomes[idx];
-}
-
-/** Varre as N primeiras linhas em busca da linha que parece ser o cabeçalho real (ignora título/data). */
-function encontrarLinhaCabecalho(matriz) {
-  const limite = Math.min(CONFIG.headerScanRows, matriz.length);
-  for (let i = 0; i < limite; i++) {
-    const linha = matriz[i] || [];
-    const textoLinha = linha.map(normalizeKey).join(' ');
-    const matches = CONFIG.headerKeywords.filter((kw) => textoLinha.includes(kw)).length;
-    if (matches >= CONFIG.minHeaderKeywordMatches) return i;
-  }
-  return 0;
-}
-
-/** Pontua o quanto uma chave de coluna (já normalizada) combina com uma lista de palavras-chave. */
-function pontuarColuna(chaveNormalizada, keywords) {
-  let melhor = null;
-  keywords.forEach((kw, idx) => {
-    const kwNorm = normalizeKey(kw);
-    if (kwNorm && chaveNormalizada.includes(kwNorm)) {
-      if (!melhor || idx < melhor.idx || (idx === melhor.idx && kwNorm.length > melhor.kwLen)) {
-        melhor = { idx, kwLen: kwNorm.length };
-      }
-    }
-  });
-  return melhor;
-}
-
-/**
- * Mapeia campo -> nome original da coluna usando um leilão global (não greedy por campo):
- * todas as combinações (campo, coluna) são pontuadas e ordenadas por prioridade + especificidade,
- * e cada coluna só pode ser usada uma vez. Isso evita que "Status PDV" roube a coluna do campo
- * "pdv" só porque contém a substring "PDV" — o match mais específico (e de maior prioridade) vence.
- */
-function mapearColunas(headers) {
-  const candidatos = [];
-  Object.entries(CONFIG.fieldKeywords).forEach(([campo, keywords]) => {
-    headers.forEach((header) => {
-      const chaveNormalizada = normalizeKey(header);
-      if (!chaveNormalizada) return;
-      const pontuacao = pontuarColuna(chaveNormalizada, keywords);
-      if (pontuacao) {
-        candidatos.push({
-          campo,
-          header,
-          score: pontuacao.idx,
-          especificidade: pontuacao.kwLen,
-          tamanhoColuna: chaveNormalizada.length,
-        });
-      }
-    });
-  });
-
-  candidatos.sort((a, b) =>
-    a.score - b.score ||
-    b.especificidade - a.especificidade ||
-    a.tamanhoColuna - b.tamanhoColuna
-  );
-
-  const mapa = {};
-  const colunasUsadas = new Set();
-  candidatos.forEach(({ campo, header }) => {
-    if (mapa[campo] || colunasUsadas.has(header)) return;
-    mapa[campo] = header;
-    colunasUsadas.add(header);
-  });
-  return mapa;
-}
-
-/** Helper genérico (uso pontual/manual): acha o valor de uma linha cujo cabeçalho combina com keywords. */
-function extrairColuna(row, keywords) {
-  let melhorChave = null;
-  let melhorPontuacao = null;
-  Object.keys(row).forEach((chave) => {
-    const pontuacao = pontuarColuna(normalizeKey(chave), keywords);
-    if (pontuacao && (!melhorPontuacao || pontuacao.idx < melhorPontuacao.idx)) {
-      melhorPontuacao = pontuacao;
-      melhorChave = chave;
-    }
-  });
-  return melhorChave ? row[melhorChave] : undefined;
-}
-
 function carregarOverrides() {
   try {
-    return JSON.parse(localStorage.getItem(CONFIG.overridesStorageKey)) || {};
+    return JSON.parse(localStorage.getItem(APP_CONFIG.overridesStorageKey)) || {};
   } catch {
     return {};
   }
@@ -195,97 +88,27 @@ function carregarOverrides() {
 
 function salvarOverrides(overrides) {
   state.overrides = overrides;
-  localStorage.setItem(CONFIG.overridesStorageKey, JSON.stringify(overrides));
+  localStorage.setItem(APP_CONFIG.overridesStorageKey, JSON.stringify(overrides));
 }
 
-function construirRegistros(worksheet) {
-  const matriz = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false, defval: '' });
-  const linhaCabecalho = encontrarLinhaCabecalho(matriz);
-  const headers = (matriz[linhaCabecalho] || []).map((h) => String(h || '').trim()).filter(Boolean);
-
-  const mapaAutomatico = mapearColunas(headers);
-  // Overrides salvos só valem se a coluna ainda existir neste arquivo.
-  const mapa = { ...mapaAutomatico };
-  Object.entries(state.overrides).forEach(([campo, header]) => {
-    if (headers.includes(header)) mapa[campo] = header;
-  });
-
-  const registros = [];
-  for (let i = linhaCabecalho + 1; i < matriz.length; i++) {
-    const linha = matriz[i];
-    if (!linha || linha.every((c) => String(c ?? '').trim() === '')) continue;
-
-    const row = {};
-    headers.forEach((h, idx) => { row[h] = linha[idx]; });
-
-    const pdv = String(row[mapa.pdv] ?? '').trim();
-    const nome = String(row[mapa.nome] ?? '').trim();
-    if (!pdv && !nome) continue;
-    if (normalizeKey(pdv).includes('TOTAL') || normalizeKey(nome).includes('TOTAL')) continue;
-
-    registros.push({
-      pdv,
-      nome,
-      setor: String(row[mapa.setor] ?? '').trim() || '—',
-      responsavel: String(row[mapa.responsavel] ?? '').trim() || '—',
-      statusGeral: String(row[mapa.statusGeral] ?? '').trim(),
-      statusSku: String(row[mapa.statusSku] ?? '').trim(),
-      faturamentoReal: parseNumero(row[mapa.faturamentoReal]),
-      faturamentoEsperado: parseNumero(row[mapa.faturamentoEsperado]),
-    });
+/** Traduz erros técnicos (do parser/worker) em mensagens que fazem sentido pra quem não é dev. */
+function mensagemAmigavel(erroTecnico) {
+  const msg = String(erroTecnico || '');
+  if (/Unsupported file|zip|central directory|not a valid/i.test(msg)) {
+    return 'O arquivo não parece ser um Excel válido (.xlsx/.xlsm/.xls). Confira se o download não foi interrompido.';
   }
-  return { registros, mapa, mapaAutomatico, linhaCabecalho, headers };
+  if (/SheetJS não carregou/i.test(msg)) {
+    return 'Não conseguimos carregar o motor de leitura de planilhas (rede bloqueou o vendor/ e a CDN). Veja o README sobre a pasta vendor/.';
+  }
+  return `Não conseguimos processar o arquivo. Detalhe técnico: ${msg}`;
 }
 
 // ---------------------------------------------------------------------------
-// CLASSIFICAÇÃO DE STATUS
+// CLASSIFICAÇÃO / KPIs / AGRUPAMENTO (delegados ao ETL compartilhado com o worker)
 // ---------------------------------------------------------------------------
 
-/** "NOK" contém "OK" como substring — por isso o NOK/Zero precisa ser checado ANTES do OK. */
-function classificarGeral(status) {
-  const s = normalizeKey(status);
-  if (!s) return 'OUTRO';
-  if (s.includes('NOK') || s.includes('ZERO')) return 'NOK';
-  if (s.includes('OK') || s.includes('BATEU') || s.includes('OVER')) return 'OK';
-  return 'OUTRO';
-}
-
-function classificarSku(status) {
-  const s = normalizeKey(status);
-  if (!s) return 'OUTRO';
-  if (s.includes('GAP') || s.includes('FALTAM')) return 'GAP';
-  if (s.includes('OK') || s.includes('BATEU') || s.includes('OVER')) return 'OK';
-  return 'OUTRO';
-}
-
-function calcularKPIs(registros) {
-  const total = registros.length;
-  let giroOk = 0, vendaZero = 0, gapsSku = 0;
-  registros.forEach((r) => {
-    const classeGeral = classificarGeral(r.statusGeral);
-    if (classeGeral === 'OK') giroOk++;
-    else if (classeGeral === 'NOK') vendaZero++;
-    if (classificarSku(r.statusSku) === 'GAP') gapsSku++;
-  });
-  return { total, giroOk, vendaZero, gapsSku };
-}
-
-function agruparPorSetor(registros) {
-  const grupos = new Map();
-  registros.forEach((r) => {
-    const chave = r.setor || '—';
-    if (!grupos.has(chave)) {
-      grupos.set(chave, { setor: chave, responsavel: r.responsavel, total: 0, giroOk: 0, gaps: 0 });
-    }
-    const g = grupos.get(chave);
-    g.total++;
-    if (classificarGeral(r.statusGeral) === 'OK') g.giroOk++;
-    if (classificarSku(r.statusSku) === 'GAP') g.gaps++;
-  });
-  const lista = Array.from(grupos.values()).map((g) => ({ ...g, atingimento: g.total ? g.giroOk / g.total : 0 }));
-  lista.sort((a, b) => a.atingimento - b.atingimento); // pior -> melhor
-  return lista;
-}
+const classificarGeral = (status) => ETL.classificarGeral(status);
+const classificarSku = (status) => ETL.classificarSku(status);
 
 // ---------------------------------------------------------------------------
 // PRNG DETERMINÍSTICO — curva "ilustrativa" do Raio-X (estável por PDV, sem backend)
@@ -322,14 +145,43 @@ function gerarCurvaSimulada(registro) {
 }
 
 // ---------------------------------------------------------------------------
-// RENDERIZAÇÃO
+// RENDERIZAÇÃO — KPIs (com delta vs. última carga) e ícones de status
 // ---------------------------------------------------------------------------
 
+const ICONES_STATUS = { OK: 'ri-checkbox-circle-fill', NOK: 'ri-close-circle-fill', OUTRO: 'ri-question-line' };
+
+function badgeStatus(classe, texto) {
+  return el('span', { class: `badge badge-${classe.toLowerCase()}` }, [
+    el('i', { class: ICONES_STATUS[classe] || ICONES_STATUS.OUTRO, 'aria-hidden': 'true' }),
+    ' ' + (texto || '—'),
+  ]);
+}
+
+function renderKpiDelta(elementoDelta, atual, anterior) {
+  if (anterior === undefined || anterior === null) { elementoDelta.textContent = ''; elementoDelta.removeAttribute('class'); return; }
+  const diff = atual - anterior;
+  elementoDelta.className = 'kpi-delta' + (diff > 0 ? ' subiu' : diff < 0 ? ' desceu' : ' estavel');
+  elementoDelta.textContent = diff === 0 ? '— sem alteração' : `${diff > 0 ? '▲' : '▼'} ${Math.abs(diff).toLocaleString('pt-BR')} desde a última carga`;
+}
+
 function renderKpis(kpis) {
+  let anterior = null;
+  try { anterior = JSON.parse(localStorage.getItem(APP_CONFIG.kpiSnapshotStorageKey)); } catch { anterior = null; }
+
   document.getElementById('kpiTotalEquip').textContent = kpis.total.toLocaleString('pt-BR');
   document.getElementById('kpiGiroOk').textContent = kpis.giroOk.toLocaleString('pt-BR');
   document.getElementById('kpiVendaZero').textContent = kpis.vendaZero.toLocaleString('pt-BR');
   document.getElementById('kpiGapsSku').textContent = kpis.gapsSku.toLocaleString('pt-BR');
+
+  const pares = [
+    ['kpiTotalEquipDelta', kpis.total, anterior?.total],
+    ['kpiGiroOkDelta', kpis.giroOk, anterior?.giroOk],
+    ['kpiVendaZeroDelta', kpis.vendaZero, anterior?.vendaZero],
+    ['kpiGapsSkuDelta', kpis.gapsSku, anterior?.gapsSku],
+  ];
+  pares.forEach(([id, atual, ant]) => renderKpiDelta(document.getElementById(id), atual, ant));
+
+  localStorage.setItem(APP_CONFIG.kpiSnapshotStorageKey, JSON.stringify(kpis));
 }
 
 function renderGerencial(grupos) {
@@ -342,7 +194,7 @@ function renderGerencial(grupos) {
   grupos.forEach((g) => {
     const pct = g.atingimento * 100;
     const corBarra = pct >= 80 ? 'ok' : pct >= 50 ? 'atencao' : 'critico';
-    const tr = el('tr', { class: 'linha-clicavel', onclick: () => irParaSetor(g.setor) }, [
+    const tr = el('tr', { class: 'linha-clicavel', tabindex: '0', role: 'button', onclick: () => irParaSetor(g.setor), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); irParaSetor(g.setor); } } }, [
       el('td', {}, g.setor),
       el('td', {}, g.responsavel),
       el('td', { class: 'num' }, String(g.total)),
@@ -370,6 +222,22 @@ function limparFiltroSetor() {
   aplicarFiltros();
 }
 
+// ---------------------------------------------------------------------------
+// AUDITORIA — tabela ordenável + busca + exportação CSV
+// ---------------------------------------------------------------------------
+
+function ordenarRegistros(lista) {
+  const { campo, direcao } = state.ordenacaoAuditoria;
+  if (!campo) return lista;
+  const copia = [...lista];
+  copia.sort((a, b) => {
+    const va = String(a[campo] ?? '').toLowerCase();
+    const vb = String(b[campo] ?? '').toLowerCase();
+    return va < vb ? -direcao : va > vb ? direcao : 0;
+  });
+  return copia;
+}
+
 function renderAuditoria() {
   const tbody = document.getElementById('auditoriaBody');
   tbody.textContent = '';
@@ -386,7 +254,7 @@ function renderAuditoria() {
       el('td', {}, r.pdv || '—'),
       el('td', {}, r.nome || '—'),
       el('td', {}, r.setor),
-      el('td', {}, el('span', { class: `badge badge-${classe.toLowerCase()}` }, r.statusGeral || '—')),
+      el('td', {}, badgeStatus(classe, r.statusGeral)),
       el('td', {}, r.statusSku || '—'),
       el('td', {}, el('button', { class: 'btn-auditar', onclick: () => abrirRaioX(r) }, 'Auditar')),
     ]);
@@ -396,23 +264,56 @@ function renderAuditoria() {
   const contador = document.getElementById('contadorAuditoria');
   contador.textContent = `Mostrando ${visiveis.length} de ${lista.length} PDVs`;
   document.getElementById('btnMostrarMais').hidden = visiveis.length >= lista.length;
+  document.getElementById('btnExportarCsv').hidden = lista.length === 0;
+
+  document.querySelectorAll('#tabelaAuditoria th[data-campo]').forEach((th) => {
+    const indicador = th.querySelector('.indicador-ordenacao');
+    if (!indicador) return;
+    indicador.textContent = th.dataset.campo === state.ordenacaoAuditoria.campo
+      ? (state.ordenacaoAuditoria.direcao === 1 ? '▲' : '▼')
+      : '';
+  });
 }
 
 function aplicarFiltros() {
-  const termo = normalizeKey(document.getElementById('searchInput').value);
+  const termo = ETL.normalizeKey(document.getElementById('searchInput').value);
   const statusSel = document.getElementById('statusFilter').value;
   let lista = state.registros;
   if (state.filtroSetor) lista = lista.filter((r) => r.setor === state.filtroSetor);
-  if (termo) lista = lista.filter((r) => normalizeKey(r.nome).includes(termo) || normalizeKey(r.pdv).includes(termo));
+  if (termo) lista = lista.filter((r) => ETL.normalizeKey(r.nome).includes(termo) || ETL.normalizeKey(r.pdv).includes(termo));
   if (statusSel !== 'todos') lista = lista.filter((r) => classificarGeral(r.statusGeral) === statusSel);
-  state.pdvsFiltrados = lista;
-  state.limiteRenderAuditoria = CONFIG.renderChunkSize;
+  state.pdvsFiltrados = ordenarRegistros(lista);
+  state.limiteRenderAuditoria = APP_CONFIG.renderChunkSize;
   renderAuditoria();
 }
 
-function renderTudo() {
-  renderKpis(calcularKPIs(state.registros));
-  renderGerencial(agruparPorSetor(state.registros));
+function escaparCsv(valor) {
+  const texto = String(valor ?? '');
+  return /[",\n;]/.test(texto) ? `"${texto.replace(/"/g, '""')}"` : texto;
+}
+
+function exportarCsv() {
+  const colunas = ['pdv', 'nome', 'setor', 'responsavel', 'statusGeral', 'statusSku', 'faturamentoEsperado', 'faturamentoReal'];
+  const cabecalho = ['PDV', 'Nome', 'Setor', 'Responsável', 'Status Geral', 'Status SKU', 'Faturamento Esperado', 'Faturamento Real'];
+  const linhas = [cabecalho.join(';')];
+  state.pdvsFiltrados.forEach((r) => {
+    linhas.push(colunas.map((c) => escaparCsv(r[c])).join(';'));
+  });
+  const blob = new Blob(['﻿' + linhas.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `auditoria_pdvs_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  mostrarToast(`CSV exportado com ${state.pdvsFiltrados.length.toLocaleString('pt-BR')} PDVs.`);
+}
+
+function renderTudo(kpis, grupos) {
+  renderKpis(kpis);
+  renderGerencial(grupos);
   aplicarFiltros();
   document.getElementById('emptyState').hidden = state.registros.length > 0;
 }
@@ -434,11 +335,13 @@ function abrirRaioX(registro) {
   renderGraficoRaioX(registro);
   document.getElementById('painelRaioX').classList.add('aberto');
   document.getElementById('overlayRaioX').hidden = false;
+  ativarFocusTrap(document.getElementById('painelRaioX'));
 }
 
 function fecharRaioX() {
   document.getElementById('painelRaioX').classList.remove('aberto');
   document.getElementById('overlayRaioX').hidden = true;
+  desativarFocusTrap();
 }
 
 function renderGraficoRaioX(registro) {
@@ -492,6 +395,7 @@ async function copiarPauta() {
 }
 
 function copiarFallback(texto) {
+  const focoOriginal = document.activeElement; // remover o textarea temporário abaixo da tela levaria o foco pro <body>
   const area = document.createElement('textarea');
   area.value = texto;
   area.setAttribute('readonly', '');
@@ -503,6 +407,7 @@ function copiarFallback(texto) {
   let copiado = false;
   try { copiado = document.execCommand('copy'); } catch { copiado = false; }
   document.body.removeChild(area);
+  if (focoOriginal && document.body.contains(focoOriginal)) focoOriginal.focus();
   if (copiado) {
     mostrarToast('Pauta copiada (modo compatibilidade).');
   } else {
@@ -516,24 +421,19 @@ function abrirModalTexto(texto) {
   const textarea = document.getElementById('modalTextoArea');
   textarea.value = texto;
   modal.hidden = false;
+  ativarFocusTrap(modal.querySelector('.modal-card'));
   textarea.focus();
   textarea.select();
+}
+
+function fecharModalTexto() {
+  document.getElementById('modalTexto').hidden = true;
+  desativarFocusTrap();
 }
 
 // ---------------------------------------------------------------------------
 // DIAGNÓSTICO DE MAPEAMENTO (permite corrigir a coluna escolhida por campo)
 // ---------------------------------------------------------------------------
-
-const ROTULOS_CAMPO = {
-  pdv: 'Código do PDV',
-  nome: 'Nome / Razão Social',
-  setor: 'Setor / GV',
-  responsavel: 'Responsável',
-  statusGeral: 'Status Geral (Giro)',
-  statusSku: 'Status SKU',
-  faturamentoReal: 'Faturamento Real',
-  faturamentoEsperado: 'Faturamento Esperado',
-};
 
 function abrirDiagnostico() {
   const modal = document.getElementById('diagnosticoModal');
@@ -543,26 +443,36 @@ function abrirDiagnostico() {
   if (!state.diagnostico) {
     corpo.appendChild(el('p', { class: 'vazio' }, 'Carregue uma planilha para ver o diagnóstico de mapeamento.'));
     modal.hidden = false;
+    ativarFocusTrap(modal.querySelector('.modal-card'));
     return;
   }
 
-  const { nomeAba, linhaCabecalho, headers, mapa } = state.diagnostico;
+  const { nomeAba, linhaCabecalho, headers, mapa, amostras, confiancaCabecalho } = state.diagnostico;
   corpo.appendChild(el('p', {}, [el('strong', {}, 'Aba usada: '), nomeAba]));
   corpo.appendChild(el('p', {}, [el('strong', {}, 'Linha do cabeçalho: '), String(linhaCabecalho + 1)]));
 
+  if (confiancaCabecalho === 'baixa') {
+    corpo.appendChild(el('p', { class: 'aviso-diagnostico' }, [
+      el('i', { class: 'ri-error-warning-line', 'aria-hidden': 'true' }),
+      ' Não encontramos uma linha de cabeçalho com confiança — conferindo o mapeamento abaixo, corrija manualmente o que estiver errado.',
+    ]));
+  }
+
   const tabela = el('table', { class: 'tabela-diagnostico' });
-  const thead = el('thead', {}, el('tr', {}, [el('th', {}, 'Campo'), el('th', {}, 'Coluna detectada'), el('th', {}, 'Trocar')]));
+  const thead = el('thead', {}, el('tr', {}, [el('th', {}, 'Campo'), el('th', {}, 'Coluna detectada'), el('th', {}, 'Amostra'), el('th', {}, 'Trocar')]));
   const tbody = el('tbody');
 
   Object.entries(ROTULOS_CAMPO).forEach(([campo, rotulo]) => {
     const colunaAtual = mapa[campo] || '(não encontrada)';
+    const amostraTexto = (amostras && amostras[campo] && amostras[campo].length) ? amostras[campo].join(', ') : '—';
     const select = el('select', { dataset: { campo } }, [
       el('option', { value: '' }, '— manter automático —'),
       ...headers.map((h) => el('option', { value: h, ...(h === mapa[campo] ? { selected: 'selected' } : {}) }, h)),
     ]);
     tbody.appendChild(el('tr', {}, [
       el('td', {}, rotulo),
-      el('td', {}, colunaAtual),
+      el('td', {}, mapa[campo] ? colunaAtual : el('span', { class: 'texto-alerta' }, colunaAtual)),
+      el('td', { class: 'amostra' }, amostraTexto),
       el('td', {}, select),
     ]));
   });
@@ -571,6 +481,7 @@ function abrirDiagnostico() {
   tabela.appendChild(tbody);
   corpo.appendChild(tabela);
   modal.hidden = false;
+  ativarFocusTrap(modal.querySelector('.modal-card'));
 }
 
 function salvarDiagnostico() {
@@ -580,33 +491,29 @@ function salvarDiagnostico() {
     if (sel.value) overrides[sel.dataset.campo] = sel.value;
   });
   salvarOverrides(overrides);
-  if (state.worksheetAtual) reprocessarComOverrides();
-  fecharDiagnostico();
-  mostrarToast('Mapeamento salvo. Dados reprocessados.');
+  if (state.bufferAtual) {
+    fecharDiagnostico();
+    executarIngestao(state.bufferAtual.slice(0), 'Reprocessando com o novo mapeamento...');
+  } else {
+    fecharDiagnostico();
+  }
 }
 
 function fecharDiagnostico() {
   document.getElementById('diagnosticoModal').hidden = true;
-}
-
-function reprocessarComOverrides() {
-  const { registros, mapa, mapaAutomatico, linhaCabecalho, headers } = construirRegistros(state.worksheetAtual);
-  state.registros = registros;
-  state.diagnostico = { nomeAba: state.diagnostico.nomeAba, linhaCabecalho, headers, mapa, mapaAutomatico };
-  renderTudo();
-  atualizarBadge(registros.length);
+  desativarFocusTrap();
 }
 
 // ---------------------------------------------------------------------------
-// TOAST / LOADING
+// TOAST / LOADING / BADGE
 // ---------------------------------------------------------------------------
 
 function mostrarToast(mensagem, tipo = 'sucesso') {
   const container = document.getElementById('toastContainer');
-  const toast = el('div', { class: `toast toast-${tipo}` }, mensagem);
+  const toast = el('div', { class: `toast toast-${tipo}`, role: tipo === 'erro' ? 'alert' : 'status' }, mensagem);
   container.appendChild(toast);
-  setTimeout(() => toast.classList.add('saindo'), 3200);
-  setTimeout(() => toast.remove(), 3600);
+  setTimeout(() => toast.classList.add('saindo'), 4200);
+  setTimeout(() => toast.remove(), 4600);
 }
 
 function mostrarLoading(mensagem) {
@@ -620,44 +527,196 @@ function esconderLoading() {
 
 function atualizarBadge(qtd) {
   const badge = document.getElementById('statusBadge');
-  badge.textContent = qtd > 0 ? `Pipeline Ativo (${qtd.toLocaleString('pt-BR')} registros)` : 'Aguardando Base';
+  if (qtd > 0) {
+    const hora = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    badge.textContent = `Pipeline Ativo (${qtd.toLocaleString('pt-BR')} registros) · carregado às ${hora}`;
+  } else {
+    badge.textContent = 'Aguardando Base';
+  }
   badge.classList.toggle('badge-ativo', qtd > 0);
 }
 
 function habilitarNavegacao(ativo) {
   document.getElementById('navGerencial').disabled = !ativo;
   document.getElementById('navAuditoria').disabled = !ativo;
+  document.getElementById('btnLimparBase').hidden = !ativo;
 }
 
 // ---------------------------------------------------------------------------
-// UPLOAD / ETL
+// UPLOAD / ETL (via Web Worker — a thread principal nunca trava)
 // ---------------------------------------------------------------------------
 
+function obterWorker() {
+  if (!state.worker) {
+    state.worker = new Worker('worker.js');
+  }
+  return state.worker;
+}
+
+function mensagemEtapa(msg) {
+  if (msg.etapa === 'processando-linhas') {
+    return `Processando linha ${msg.atual.toLocaleString('pt-BR')} de ${msg.total.toLocaleString('pt-BR')}...`;
+  }
+  return ETAPAS_LOADING[msg.etapa] || 'Processando...';
+}
+
+function definirCarregando(carregando) {
+  state.carregando = carregando;
+  document.getElementById('btnDiagnostico').disabled = carregando;
+  document.getElementById('btnUpload').disabled = carregando;
+  document.getElementById('btnLimparBase').disabled = carregando;
+}
+
+function executarIngestao(buffer, mensagemInicial) {
+  definirCarregando(true);
+  mostrarLoading(mensagemInicial);
+  const worker = obterWorker();
+
+  worker.onmessage = (evento) => {
+    const msg = evento.data;
+    if (msg.tipo === 'progresso') {
+      mostrarLoading(mensagemEtapa(msg));
+      return;
+    }
+    if (msg.tipo === 'erro') {
+      console.error(msg.mensagem);
+      mostrarToast(mensagemAmigavel(msg.mensagem), 'erro');
+      esconderLoading();
+      definirCarregando(false);
+      return;
+    }
+    if (msg.tipo === 'resultado') {
+      state.registros = msg.registros;
+      state.diagnostico = {
+        nomeAba: msg.nomeAba,
+        linhaCabecalho: msg.linhaCabecalho,
+        headers: msg.headers,
+        mapa: msg.mapa,
+        mapaAutomatico: msg.mapaAutomatico,
+        amostras: msg.amostras,
+        confiancaCabecalho: msg.confiancaCabecalho,
+      };
+      state.filtroSetor = null;
+      document.getElementById('filtroSetorAtivo').closest('.filtro-setor').hidden = true;
+
+      renderTudo(msg.kpis, msg.grupos);
+      atualizarBadge(msg.registros.length);
+      habilitarNavegacao(true);
+      esconderLoading();
+      definirCarregando(false);
+
+      if (msg.registros.length === 0) {
+        mostrarToast('Nenhum registro reconhecido nesta aba. Abra o Diagnóstico para conferir a aba e o mapeamento.', 'erro');
+      } else if (msg.confiancaCabecalho === 'baixa') {
+        mostrarToast('Cabeçalho não identificado com confiança — confira o mapeamento no Diagnóstico.', 'erro');
+      } else if (!msg.mapa.pdv && !msg.mapa.nome) {
+        mostrarToast('Não localizamos as colunas de PDV/Nome automaticamente. Corrija no Diagnóstico.', 'erro');
+      } else {
+        mostrarToast(`Base carregada: ${msg.registros.length.toLocaleString('pt-BR')} registros na aba "${msg.nomeAba}".`);
+      }
+    }
+  };
+
+  worker.onerror = (erro) => {
+    console.error(erro);
+    mostrarToast(mensagemAmigavel(erro.message), 'erro');
+    esconderLoading();
+    definirCarregando(false);
+  };
+
+  const copiaParaWorker = buffer.slice(0);
+  worker.postMessage({ buffer: copiaParaWorker, overrides: state.overrides }, [copiaParaWorker]);
+}
+
+const EXTENSOES_ACEITAS = /\.(xlsx|xlsm|xls)$/i;
+
 async function processarArquivo(file) {
-  mostrarLoading('Descodificando matrizes binárias na RAM...');
+  if (!EXTENSOES_ACEITAS.test(file.name)) {
+    mostrarToast(`Formato "${file.name.split('.').pop()}" não suportado. Use .xlsx, .xlsm ou .xls.`, 'erro');
+    return;
+  }
+  mostrarLoading('Lendo o arquivo...');
   try {
     const buffer = await file.arrayBuffer();
-    const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
-    const nomeAba = encontrarAbaAlvo(workbook);
-    const worksheet = workbook.Sheets[nomeAba];
-    state.worksheetAtual = worksheet;
-
-    const { registros, mapa, mapaAutomatico, linhaCabecalho, headers } = construirRegistros(worksheet);
-    state.registros = registros;
-    state.diagnostico = { nomeAba, linhaCabecalho, headers, mapa, mapaAutomatico };
-    state.filtroSetor = null;
-    document.getElementById('filtroSetorAtivo').closest('.filtro-setor').hidden = true;
-
-    renderTudo();
-    atualizarBadge(registros.length);
-    habilitarNavegacao(true);
-    mostrarToast(`Base carregada: ${registros.length.toLocaleString('pt-BR')} registros na aba "${nomeAba}".`);
+    state.bufferAtual = buffer;
+    executarIngestao(buffer.slice(0), 'Descodificando matrizes binárias na RAM...');
   } catch (err) {
     console.error(err);
-    mostrarToast('Erro ao processar o arquivo: ' + err.message, 'erro');
-  } finally {
+    mostrarToast(mensagemAmigavel(err.message), 'erro');
     esconderLoading();
   }
+}
+
+function limparBase() {
+  if (!confirm('Limpar a base carregada? Isso não afeta o mapeamento salvo nem o tema.')) return;
+  state.registros = [];
+  state.pdvsFiltrados = [];
+  state.diagnostico = null;
+  state.bufferAtual = null;
+  state.filtroSetor = null;
+  state.registroAtivo = null;
+  document.getElementById('filtroSetorAtivo').closest('.filtro-setor').hidden = true;
+  renderTudo({ total: 0, giroOk: 0, vendaZero: 0, gapsSku: 0 }, []);
+  atualizarBadge(0);
+  habilitarNavegacao(false);
+  ativarView('gerencial');
+  mostrarToast('Base removida da memória.');
+}
+
+// ---------------------------------------------------------------------------
+// FOCUS TRAP / FECHAMENTO PADRÃO (Esc + clique fora) PARA TODOS OS OVERLAYS
+// ---------------------------------------------------------------------------
+
+function elementosFocaveis(container) {
+  return Array.from(container.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+    .filter((elemento) => !elemento.disabled && elemento.offsetParent !== null);
+}
+
+/**
+ * Empilha o trap (não substitui um único global) para suportar overlays aninhados —
+ * ex.: abrir o Raio-X, clicar em "Copiar Pauta" e cair no modal de cópia manual por cima.
+ * Fechar o de cima restaura o foco e o trap do de baixo, em vez de perder a referência.
+ */
+function ativarFocusTrap(container) {
+  const focoAnterior = document.activeElement;
+  // Foca o próprio diálogo (não o primeiro campo aleatório lá dentro) — padrão de acessibilidade
+  // pra modal: o leitor de tela anuncia o título do diálogo em vez de cair direto num <select> da tabela.
+  if (!container.hasAttribute('tabindex')) container.setAttribute('tabindex', '-1');
+  container.focus();
+
+  const aoTeclar = (e) => {
+    if (e.key !== 'Tab') return;
+    const lista = elementosFocaveis(container);
+    if (!lista.length) return;
+    const primeiro = lista[0];
+    const ultimo = lista[lista.length - 1];
+    if (e.shiftKey && document.activeElement === primeiro) { e.preventDefault(); ultimo.focus(); }
+    else if (!e.shiftKey && document.activeElement === ultimo) { e.preventDefault(); primeiro.focus(); }
+  };
+  container.addEventListener('keydown', aoTeclar);
+  state.pilhaFocusTrap.push({
+    focoAnterior,
+    remover: () => container.removeEventListener('keydown', aoTeclar),
+  });
+}
+
+function desativarFocusTrap() {
+  const topo = state.pilhaFocusTrap.pop();
+  if (!topo) return;
+  topo.remover();
+  if (topo.focoAnterior && document.body.contains(topo.focoAnterior)) topo.focoAnterior.focus();
+}
+
+/** Fecha o overlay "mais de cima" aberto no momento (Esc funciona igual em qualquer modal/painel). */
+function fecharOverlayAtivo() {
+  if (!document.getElementById('modalTexto').hidden) { fecharModalTexto(); return true; }
+  if (!document.getElementById('diagnosticoModal').hidden) { fecharDiagnostico(); return true; }
+  if (document.getElementById('painelRaioX').classList.contains('aberto')) { fecharRaioX(); return true; }
+  return false;
+}
+
+function tornarFechavelPorClique(overlayEl, aoFechar) {
+  overlayEl.addEventListener('click', (e) => { if (e.target === overlayEl) aoFechar(); });
 }
 
 // ---------------------------------------------------------------------------
@@ -671,13 +730,13 @@ function ativarView(nomeView) {
 
 function aplicarTema(tema) {
   document.documentElement.setAttribute('data-theme', tema);
-  localStorage.setItem(CONFIG.themeStorageKey, tema);
+  localStorage.setItem(APP_CONFIG.themeStorageKey, tema);
   const icone = document.getElementById('iconeTema');
   if (icone) icone.className = tema === 'light' ? 'ri-moon-line' : 'ri-sun-line';
 }
 
 function initTema() {
-  aplicarTema(localStorage.getItem(CONFIG.themeStorageKey) || 'dark');
+  aplicarTema(localStorage.getItem(APP_CONFIG.themeStorageKey) || 'dark');
   document.getElementById('btnTheme').addEventListener('click', () => {
     const atual = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
     aplicarTema(atual);
@@ -701,6 +760,8 @@ function initUpload() {
     const file = e.dataTransfer.files && e.dataTransfer.files[0];
     if (file) processarArquivo(file);
   });
+
+  document.getElementById('btnLimparBase').addEventListener('click', limparBase);
 }
 
 function initNavegacao() {
@@ -713,15 +774,37 @@ function initFiltros() {
   document.getElementById('searchInput').addEventListener('input', aplicarFiltros);
   document.getElementById('statusFilter').addEventListener('change', aplicarFiltros);
   document.getElementById('btnMostrarMais').addEventListener('click', () => {
-    state.limiteRenderAuditoria += CONFIG.renderChunkSize;
+    state.limiteRenderAuditoria += APP_CONFIG.renderChunkSize;
     renderAuditoria();
   });
   document.getElementById('btnLimparFiltroSetor').addEventListener('click', limparFiltroSetor);
+  document.getElementById('btnExportarCsv').addEventListener('click', exportarCsv);
+
+  document.querySelectorAll('#tabelaAuditoria th[data-campo]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const campo = th.dataset.campo;
+      if (state.ordenacaoAuditoria.campo === campo) {
+        state.ordenacaoAuditoria.direcao *= -1;
+      } else {
+        state.ordenacaoAuditoria = { campo, direcao: 1 };
+      }
+      aplicarFiltros();
+    });
+  });
+
+  // Atalho "/" foca a busca (só quando não estamos digitando em outro campo).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || (e.target instanceof Element && e.target.matches('input, textarea, select'))) return;
+    const auditoriaAtiva = document.querySelector('.view[data-view="auditoria"]').classList.contains('ativa');
+    if (!auditoriaAtiva) return;
+    e.preventDefault();
+    document.getElementById('searchInput').focus();
+  });
 }
 
 function initRaioX() {
   document.getElementById('btnFecharRaioX').addEventListener('click', fecharRaioX);
-  document.getElementById('overlayRaioX').addEventListener('click', fecharRaioX);
+  tornarFechavelPorClique(document.getElementById('overlayRaioX'), fecharRaioX);
   document.getElementById('btnCopiarPauta').addEventListener('click', copiarPauta);
 }
 
@@ -729,7 +812,24 @@ function initDiagnostico() {
   document.getElementById('btnDiagnostico').addEventListener('click', abrirDiagnostico);
   document.getElementById('btnFecharDiagnostico').addEventListener('click', fecharDiagnostico);
   document.getElementById('btnSalvarDiagnostico').addEventListener('click', salvarDiagnostico);
-  document.getElementById('btnFecharModalTexto').addEventListener('click', () => { document.getElementById('modalTexto').hidden = true; });
+  tornarFechavelPorClique(document.getElementById('diagnosticoModal'), fecharDiagnostico);
+
+  document.getElementById('btnFecharModalTexto').addEventListener('click', fecharModalTexto);
+  tornarFechavelPorClique(document.getElementById('modalTexto'), fecharModalTexto);
+}
+
+function initTeclasGlobais() {
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') fecharOverlayAtivo();
+  });
+}
+
+function initPWA() {
+  if (!('serviceWorker' in navigator)) return;
+  if (window.DESATIVAR_SW_EM_DEV) return; // ligado só durante o desenvolvimento local, pra não cachear versões antigas
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch((err) => console.warn('Service Worker não registrado:', err));
+  });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -739,6 +839,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initFiltros();
   initRaioX();
   initDiagnostico();
+  initTeclasGlobais();
+  initPWA();
 
   const prontas = window.bibliotecasProntas || Promise.resolve();
   prontas.then(() => {
