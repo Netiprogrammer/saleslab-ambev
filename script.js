@@ -1,923 +1,748 @@
 'use strict';
 
-/* =====================================================================
-   SalesLab Ops: Central Executiva Ambev
-   App 100% client-side: o Excel é lido na memória do navegador e nada
-   é enviado para nenhum servidor.
-   ===================================================================== */
+/**
+ * SalesLab · Ambev — Command Center Operacional
+ * ETL 100% client-side (SheetJS) + KPIs + Visão Gerencial + Auditoria de PDVs + Raio-X (Chart.js).
+ * Nenhum dado sai do navegador: tudo é lido, processado e descartado em memória (RAM).
+ */
 
-/* ---------- Configuração (ajuste aqui sem mexer no resto) ---------- */
+// ---------------------------------------------------------------------------
+// CONFIGURAÇÃO — regras de negócio centralizadas (fácil de ajustar via Diagnóstico)
+// ---------------------------------------------------------------------------
 const CONFIG = {
-    META_ATINGIMENTO: 70,          // % mínimo de Giro OK por setor para ficar verde
-    PAGINA: 200,                   // linhas exibidas por vez na Auditoria de PDVs
-    LINHAS_BUSCA_CABECALHO: 40,    // quantas linhas do topo varrer atrás do cabeçalho
-    MAX_STATUS_DIAG: 14,           // valores distintos de status listados no Diagnóstico
-    CHAVE_MAPA: 'saleslab.mapa.v1' // onde o mapeamento manual de colunas é salvo
+  sheetKeywordsPrimary: ['BIDEEQUIPAMENTOS', 'VISIBILIDADE', 'SKUPDV'],
+  sheetKeywordsSupport: ['VISAOGERENCIAL'],
+  headerScanRows: 15,
+  headerKeywords: ['PDV', 'STATUS', 'SETOR'],
+  minHeaderKeywordMatches: 2,
+  renderChunkSize: 200,
+  // Prioridade das palavras-chave por campo (índice menor = mais prioritário).
+  fieldKeywords: {
+    pdv: ['PDV', 'COD', 'CLIENTE'],
+    nome: ['RAZAO', 'NOME', 'FANTASIA'],
+    setor: ['GV', 'SETOR', 'CODSETOR'],
+    responsavel: ['SUPERCOM', 'COMERCIAL', 'RN', 'DONO'],
+    statusGeral: ['STATUSPDV', 'STATUSDO', 'GIRO'],
+    statusSku: ['STATUSSKU', 'SKU'],
+    faturamentoReal: ['FATURAMENTOREAL', 'REAL'],
+    faturamentoEsperado: ['FATURAMENTOESPERADO', 'ESPERADO'],
+  },
+  overridesStorageKey: 'saleslab_column_overrides',
+  themeStorageKey: 'saleslab_theme',
 };
 
-/* Bibliotecas: tenta primeiro a cópia local (pasta vendor/), depois a CDN.
-   Assim o app continua funcionando em rede corporativa que bloqueia CDNs. */
-const LIBS = {
-    XLSX:  ['vendor/xlsx.full.min.js', 'https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js'],
-    Chart: ['vendor/chart.umd.js', 'https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.js']
+// Estado global da aplicação (única fonte de verdade em memória).
+const state = {
+  registros: [],
+  pdvsFiltrados: [],
+  limiteRenderAuditoria: CONFIG.renderChunkSize,
+  filtroSetor: null,
+  registroAtivo: null,
+  diagnostico: null,
+  overrides: carregarOverrides(),
+  chartInstance: null,
 };
 
-/* Termos que identificam a linha de cabeçalho (já sem acento e em maiúsculas) */
-const TERMOS_CABECALHO = ['PDV', 'STATUS', 'SETOR', 'RAZAO', 'FANTASIA', 'GV', 'CLIENTE', 'SKU', 'GAP', 'GIRO', 'FATURAMENTO', 'COD', 'NOME'];
+// ---------------------------------------------------------------------------
+// UTILITÁRIOS
+// ---------------------------------------------------------------------------
 
-/* Campos do app e como localizá-los. Os padrões são testados contra o nome da
-   coluna normalizado (sem acento, maiúsculas, quebras de linha viram espaço) e a
-   ORDEM importa: o primeiro padrão é o mais específico. */
-const CAMPOS = [
-    { id: 'pdv',     rotulo: 'Código do PDV',
-      excluir: /STATUS|GAP|FAT|NOME|RAZAO|SETOR|\bGV\b|SKU|EQUIP/,
-      padroes: [/^(COD|CODIGO) (DO )?(PDV|CLIENTE)$/, /^(PDV|CLIENTE|COD|CODIGO)$/, /^(COD|CODIGO)\b/, /\bPDV\b/] },
-    { id: 'nome',    rotulo: 'Nome fantasia',
-      excluir: /REPRESENTANTE|SUPERVIS|VENDEDOR|\bGV\b|\bRN\b|STATUS|SETOR/,
-      padroes: [/NOME FANTASIA/, /FANTASIA/, /RAZAO SOCIAL/, /RAZAO/, /^NOME/, /NOME/] },
-    { id: 'setor',   rotulo: 'Setor',
-      excluir: /STATUS|GAP/,
-      padroes: [/^SETOR$/, /^(COD )?SETOR/, /SETOR/, /^GV$/] },
-    { id: 'dono',    rotulo: 'Representante / dono',
-      excluir: /STATUS|GAP/,
-      padroes: [/REPRESENTANTE/, /^RN$/, /^DONO/, /SUPERVIS|SUPERCOM/, /^GV$/, /COMERCIAL/] },
-    { id: 'status',  rotulo: 'Status do PDV (giro)',
-      excluir: /SKU|GAP/,
-      padroes: [/^STATUS PDV$/, /^STATUS( GERAL| GIRO| DO PDV)?$/, /STATUS.*(PDV|GIRO)/, /GIRO/, /SITUACAO/, /STATUS/] },
-    { id: 'gap',     rotulo: 'GAP de SKU',
-      excluir: null,
-      padroes: [/^GAP SKU PDV$/, /GAP.*SKU|SKU.*GAP/, /^GAP/, /GAP/, /FALTAM?/] },
-    { id: 'fatEsp',  rotulo: 'Faturamento esperado',
-      excluir: null,
-      padroes: [/FAT\w* ESPERAD/, /ESPERAD/, /META (FAT|R )/] },
-    { id: 'fatReal', rotulo: 'Faturamento real',
-      excluir: null,
-      padroes: [/FAT\w* (REAL|PDV|ATUAL)/, /REALIZAD/, /^REAL$/, /FATURAMENTO/] }
-];
-
-/* Classificação do texto do status. A ordem importa: "NOK" é testado antes de
-   "OK" (e \b garante que "NOK" nunca case com "OK"). Edite os termos se o BI
-   usar outras palavras: o Diagnóstico mostra como cada valor foi classificado. */
-const CLASSES = [
-    { cat: 'vz',  rx: /\bVENDA ZERO\b|\bVZ\b|\bSEM VENDA\b/ },
-    { cat: 'nok', rx: /\bNOK\b|\bNAO OK\b|\bNAO ADERENTE\b|\bINADERENTE\b|\bNAO BATEU\b/ },
-    { cat: 'gap', rx: /\bGAP\b|\bFALTAM?\b/ },
-    { cat: 'ok',  rx: /\bOK\b|\bOVER\b|\bBATEU\b|\bADERENTE\b/ }
-];
-const ROTULO_CAT = { ok: 'Giro OK', gap: 'GAP', vz: 'Venda zero', nok: 'NOK', outro: 'Não classificado', vazio: 'Sem status' };
-const CLASSE_CAT = { ok: 'ok', gap: 'danger', vz: 'warning', nok: 'danger', outro: 'neutral', vazio: 'neutral' };
-
-/* ---------- Utilitários ---------- */
-const $ = (id) => document.getElementById(id);
-
-const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;', '`': '&#96;' };
-/* Todo texto vindo do Excel passa por aqui antes de entrar em innerHTML */
-const escapeHTML = (v) => (v === null || v === undefined) ? '' : String(v).replace(/[&<>'"`]/g, (c) => ESC[c]);
-
-const txt = (v) => (v === null || v === undefined) ? '' : String(v).trim();
-const semAcento = (s) => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-const simples = (s) => semAcento(s).toLowerCase();
-/* "Status \nPDV" -> "STATUS PDV" | "GAP SKU/PDV" -> "GAP SKU PDV" | "Cód. PDV" -> "COD PDV" */
-const normalizar = (v) => semAcento(v).toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
-
-const fmtInt = (n) => Number(n).toLocaleString('pt-BR');
-const BRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
-
-/* Cede o controle ao navegador para pintar o overlay antes de um trabalho pesado.
-   O timeout garante que não trava se a aba estiver em segundo plano. */
-const frame = () => new Promise((resolve) => {
-    let feito = false;
-    const fim = () => { if (!feito) { feito = true; resolve(); } };
-    requestAnimationFrame(() => setTimeout(fim, 0));
-    setTimeout(fim, 120);
-});
-
-const store = {
-    get(chave, padrao = null) { try { const v = localStorage.getItem(chave); return v === null ? padrao : v; } catch (_) { return padrao; } },
-    set(chave, valor) { try { localStorage.setItem(chave, valor); } catch (_) { /* storage bloqueado: segue sem persistir */ } }
-};
-
-function paraNumero(v) {
-    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
-    if (typeof v !== 'string') return null;
-    let s = v.trim().replace(/[R$\s%]/g, '');
-    if (!s || !/[0-9]/.test(s)) return null;
-    if (/^-?\d{1,3}(\.\d{3})+(,\d+)?$/.test(s)) s = s.replace(/\./g, '').replace(',', '.');   // 1.234,56
-    else if (/^-?\d+,\d+$/.test(s)) s = s.replace(',', '.');                                   // 12,5
-    else if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
-    const n = parseFloat(s);
-    return Number.isFinite(n) ? n : null;
+/** Remove acentos, espaços, quebras de linha e pontuação; deixa tudo maiúsculo. */
+function normalizeKey(str) {
+  return String(str ?? '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .toUpperCase();
 }
 
-function fmtValor(v) {
-    const n = paraNumero(v);
-    if (n !== null) return BRL.format(n);
-    return txt(v) || '—';
+function parseNumero(valor) {
+  if (valor === undefined || valor === null || valor === '') return 0;
+  if (typeof valor === 'number') return valor;
+  const limpo = String(valor)
+    .replace(/[^\d,.-]/g, '')
+    .replace(/\.(?=\d{3}(\D|$))/g, '')
+    .replace(',', '.');
+  const numero = parseFloat(limpo);
+  return Number.isFinite(numero) ? numero : 0;
 }
 
-const setorLabel = (s) => /^\d+$/.test(s) ? `Setor ${s}` : s;
-
-/* ---------- Estado e referências do DOM ---------- */
-const estado = {
-    arquivo: '', buffer: null, abas: [], aba: '',
-    cabecalhos: [], linhas: [], linhaCabecalho: 0, cabecalhoDetectado: false,
-    mapa: {}, registros: [], setores: [],
-    modo: 'gerencial', filtrados: [], visiveis: CONFIG.PAGINA,
-    filtroSetor: null, selecionadoId: null,
-    chart: null, regGrafico: null, ocupado: false
-};
-
-const dom = {
-    fileInput: $('excelFileInput'), btnUpload: $('btn-upload'), btnDiag: $('btn-diag'),
-    themeToggle: $('theme-toggle'), viewTitle: $('view-title'), fileStatus: $('file-status'),
-    kpiTotal: $('kpi-total'), kpiOk: $('kpi-ok'), kpiVz: $('kpi-vz'), kpiGap: $('kpi-gap'),
-    kpiTotalSub: $('kpi-total-sub'), kpiOkSub: $('kpi-ok-sub'), kpiVzSub: $('kpi-vz-sub'), kpiGapSub: $('kpi-gap-sub'),
-    toolbar: $('toolbar-search'), busca: $('tableSearch'), filtroStatus: $('filtroStatus'), chipSetor: $('chipSetor'),
-    split: $('splitView'), thead: $('tableHead'), tbody: $('tableBody'),
-    footer: $('tableFooter'), count: $('tableCount'), btnMais: $('btnMais'),
-    side: $('sideDetail'), detId: $('det-id'), detContent: $('det-content'),
-    chartWrap: $('chartContainer'), chartNote: $('chartNote'), canvas: $('pdvChart'),
-    overlay: $('loadingOverlay'), loadTitle: $('loadingTitle'), loadText: $('loadingText'), loadBar: $('loadingBar'),
-    dropHint: $('dropHint'), modal: $('diagModal'), diagSheet: $('diagSheet'), diagInfo: $('diagInfo'),
-    diagMap: $('diagMap'), diagStatus: $('diagStatus'), diagClose: $('diagClose'), diagOk: $('diagOk'), diagReset: $('diagReset'),
-    toastStack: $('toastStack')
-};
-
-/* ---------- Feedback: toast e loading ---------- */
-function toast(msg, tipo = 'info', ms = 4500) {
-    const el = document.createElement('div');
-    el.className = `toast ${tipo}`;
-    el.textContent = msg;
-    el.addEventListener('click', () => el.remove());
-    dom.toastStack.appendChild(el);
-    setTimeout(() => el.remove(), ms);
+function formatMoeda(valor) {
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valor || 0);
 }
 
-function mostrarLoading(titulo, texto, pct) {
-    dom.loadTitle.textContent = titulo;
-    dom.loadText.textContent = texto || '';
-    if (pct === null || pct === undefined) {
-        dom.loadBar.classList.add('indet');
-        dom.loadBar.style.width = '';
-    } else {
-        dom.loadBar.classList.remove('indet');
-        dom.loadBar.style.width = `${Math.round(pct * 100)}%`;
+/** Cria um elemento DOM sem nunca usar innerHTML com dados do Excel (evita XSS). */
+function el(tag, props = {}, filhos = []) {
+  const node = document.createElement(tag);
+  Object.entries(props).forEach(([chave, valor]) => {
+    if (chave === 'class') node.className = valor;
+    else if (chave === 'dataset') Object.entries(valor).forEach(([dk, dv]) => { node.dataset[dk] = dv; });
+    else if (chave.startsWith('on') && typeof valor === 'function') node.addEventListener(chave.slice(2), valor);
+    else node.setAttribute(chave, valor);
+  });
+  (Array.isArray(filhos) ? filhos : [filhos]).forEach((filho) => {
+    if (filho === null || filho === undefined) return;
+    node.appendChild(typeof filho === 'string' || typeof filho === 'number' ? document.createTextNode(String(filho)) : filho);
+  });
+  return node;
+}
+
+function getCssVar(nome) {
+  return getComputedStyle(document.documentElement).getPropertyValue(nome).trim();
+}
+
+// ---------------------------------------------------------------------------
+// MOTOR DE INGESTÃO — seleção de aba, detecção de cabeçalho e fuzzy matching
+// ---------------------------------------------------------------------------
+
+function encontrarAbaAlvo(workbook) {
+  const nomes = workbook.SheetNames;
+  const normalizados = nomes.map(normalizeKey);
+  let idx = normalizados.findIndex((n) => CONFIG.sheetKeywordsPrimary.some((kw) => n.includes(kw)));
+  if (idx === -1) idx = normalizados.findIndex((n) => CONFIG.sheetKeywordsSupport.some((kw) => n.includes(kw)));
+  if (idx === -1) idx = 0;
+  return nomes[idx];
+}
+
+/** Varre as N primeiras linhas em busca da linha que parece ser o cabeçalho real (ignora título/data). */
+function encontrarLinhaCabecalho(matriz) {
+  const limite = Math.min(CONFIG.headerScanRows, matriz.length);
+  for (let i = 0; i < limite; i++) {
+    const linha = matriz[i] || [];
+    const textoLinha = linha.map(normalizeKey).join(' ');
+    const matches = CONFIG.headerKeywords.filter((kw) => textoLinha.includes(kw)).length;
+    if (matches >= CONFIG.minHeaderKeywordMatches) return i;
+  }
+  return 0;
+}
+
+/** Pontua o quanto uma chave de coluna (já normalizada) combina com uma lista de palavras-chave. */
+function pontuarColuna(chaveNormalizada, keywords) {
+  let melhor = null;
+  keywords.forEach((kw, idx) => {
+    const kwNorm = normalizeKey(kw);
+    if (kwNorm && chaveNormalizada.includes(kwNorm)) {
+      if (!melhor || idx < melhor.idx || (idx === melhor.idx && kwNorm.length > melhor.kwLen)) {
+        melhor = { idx, kwLen: kwNorm.length };
+      }
     }
-    dom.overlay.classList.remove('hidden');
-}
-const esconderLoading = () => dom.overlay.classList.add('hidden');
-
-/* ---------- Bibliotecas (vendor/ primeiro, CDN depois) ---------- */
-const promessasLib = {};
-function carregarScript(src) {
-    return new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = src;
-        s.onload = resolve;
-        s.onerror = () => reject(new Error(`Falha ao carregar ${src}`));
-        document.head.appendChild(s);
-    });
-}
-function garantirLib(nome) {
-    if (window[nome]) return Promise.resolve(true);
-    if (!promessasLib[nome]) {
-        promessasLib[nome] = (async () => {
-            for (const src of LIBS[nome]) {
-                try { await carregarScript(src); if (window[nome]) return true; } catch (_) { /* tenta a próxima fonte */ }
-            }
-            return false;
-        })().then((ok) => { if (!ok) delete promessasLib[nome]; return ok; });
-    }
-    return promessasLib[nome];
+  });
+  return melhor;
 }
 
-/* ---------- Tema ---------- */
-function aplicarTema(tema) {
-    document.documentElement.setAttribute('data-theme', tema);
-    store.set('theme', tema);
-    const icone = dom.themeToggle.querySelector('i');
-    if (icone) icone.className = tema === 'light' ? 'ri-moon-line' : 'ri-sun-line';
-    if (estado.regGrafico) desenharGrafico(estado.regGrafico);   // recolore o gráfico
-}
-
-/* =====================================================================
-   MOTOR DE INGESTÃO (ETL em memória)
-   ===================================================================== */
-
-function lerArquivo(file, onProgress) {
-    return new Promise((resolve, reject) => {
-        const leitor = new FileReader();
-        leitor.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
-        leitor.onload = () => resolve(leitor.result);
-        leitor.onerror = () => reject(leitor.error || new Error('Não foi possível ler o arquivo.'));
-        leitor.readAsArrayBuffer(file);
-    });
-}
-
-/* Aba preferida: a de visibilidade / BI de equipamentos. Sem ela, a primeira. */
-function escolherAba(nomes) {
-    const preferidas = [/VISIBILIDADE/, /BI.*EQUIP/, /SKU.*PDV|PDV.*SKU/];
-    for (const rx of preferidas) {
-        const achada = nomes.find((n) => rx.test(normalizar(n)));
-        if (achada) return achada;
-    }
-    return nomes[0];
-}
-
-/* Smart Header Parser: varre o topo da aba atrás da linha que parece cabeçalho
-   (várias células de texto e pelo menos 2 termos-chave). Linhas de título ou de
-   data ("DATA: 23/09/2026") têm poucas células e ficam de fora. */
-function detectarCabecalho(matriz) {
-    const limite = Math.min(CONFIG.LINHAS_BUSCA_CABECALHO, matriz.length);
-    let melhor = { idx: -1, hits: 0 };
-    for (let i = 0; i < limite; i++) {
-        const linha = matriz[i] || [];
-        const textos = linha.filter((c) => typeof c === 'string' && c.trim() !== '');
-        if (textos.length < 3) continue;
-        const tokens = new Set();
-        textos.forEach((t) => normalizar(t).split(' ').forEach((p) => tokens.add(p)));
-        const hits = TERMOS_CABECALHO.filter((t) => tokens.has(t)).length;
-        if (hits > melhor.hits) melhor = { idx: i, hits };
-    }
-    return melhor.hits >= 2 ? melhor.idx : -1;
-}
-
-/* Mapeamento manual salvo (por nome normalizado do cabeçalho) */
-function lerMapaSalvo() {
-    try { return JSON.parse(store.get(CONFIG.CHAVE_MAPA, '{}')) || {}; } catch (_) { return {}; }
-}
-function salvarMapaManual(campo, cabecalhoNorm) {
-    const m = lerMapaSalvo();
-    m[campo] = cabecalhoNorm;
-    store.set(CONFIG.CHAVE_MAPA, JSON.stringify(m));
-}
-
-/* Fuzzy matching: para cada campo escolhe a coluna cujo nome casa com o padrão
-   mais específico (respeitando a ordem dos padrões, não a ordem das colunas). */
-function autoMapear(cabecalhos) {
-    const norm = cabecalhos.map(normalizar);
-    const salvo = lerMapaSalvo();
-    const usados = new Set();
-    const mapa = {};
-
-    // 1) Escolhas manuais salvas têm prioridade
-    for (const campo of CAMPOS) {
-        if (!Object.prototype.hasOwnProperty.call(salvo, campo.id)) continue;
-        if (salvo[campo.id] === '') { mapa[campo.id] = -1; continue; }
-        const i = norm.indexOf(salvo[campo.id]);
-        if (i >= 0) { mapa[campo.id] = i; usados.add(i); }
-    }
-    // 2) Detecção automática para o restante (uma coluna não é reaproveitada por outro campo)
-    for (const campo of CAMPOS) {
-        if (campo.id in mapa) continue;
-        let melhor = { p: Infinity, i: -1 };
-        norm.forEach((h, i) => {
-            if (!h || usados.has(i)) return;
-            if (campo.excluir && campo.excluir.test(h)) return;
-            const p = campo.padroes.findIndex((rx) => rx.test(h));
-            if (p >= 0 && p < melhor.p) melhor = { p, i };
+/**
+ * Mapeia campo -> nome original da coluna usando um leilão global (não greedy por campo):
+ * todas as combinações (campo, coluna) são pontuadas e ordenadas por prioridade + especificidade,
+ * e cada coluna só pode ser usada uma vez. Isso evita que "Status PDV" roube a coluna do campo
+ * "pdv" só porque contém a substring "PDV" — o match mais específico (e de maior prioridade) vence.
+ */
+function mapearColunas(headers) {
+  const candidatos = [];
+  Object.entries(CONFIG.fieldKeywords).forEach(([campo, keywords]) => {
+    headers.forEach((header) => {
+      const chaveNormalizada = normalizeKey(header);
+      if (!chaveNormalizada) return;
+      const pontuacao = pontuarColuna(chaveNormalizada, keywords);
+      if (pontuacao) {
+        candidatos.push({
+          campo,
+          header,
+          score: pontuacao.idx,
+          especificidade: pontuacao.kwLen,
+          tamanhoColuna: chaveNormalizada.length,
         });
-        mapa[campo.id] = melhor.i;
-        if (melhor.i >= 0) usados.add(melhor.i);
+      }
+    });
+  });
+
+  candidatos.sort((a, b) =>
+    a.score - b.score ||
+    b.especificidade - a.especificidade ||
+    a.tamanhoColuna - b.tamanhoColuna
+  );
+
+  const mapa = {};
+  const colunasUsadas = new Set();
+  candidatos.forEach(({ campo, header }) => {
+    if (mapa[campo] || colunasUsadas.has(header)) return;
+    mapa[campo] = header;
+    colunasUsadas.add(header);
+  });
+  return mapa;
+}
+
+/** Helper genérico (uso pontual/manual): acha o valor de uma linha cujo cabeçalho combina com keywords. */
+function extrairColuna(row, keywords) {
+  let melhorChave = null;
+  let melhorPontuacao = null;
+  Object.keys(row).forEach((chave) => {
+    const pontuacao = pontuarColuna(normalizeKey(chave), keywords);
+    if (pontuacao && (!melhorPontuacao || pontuacao.idx < melhorPontuacao.idx)) {
+      melhorPontuacao = pontuacao;
+      melhorChave = chave;
     }
-    return mapa;
+  });
+  return melhorChave ? row[melhorChave] : undefined;
 }
 
-function classificarStatus(texto) {
-    const t = normalizar(texto);
-    if (!t) return 'vazio';
-    for (const c of CLASSES) if (c.rx.test(t)) return c.cat;
-    return 'outro';
+function carregarOverrides() {
+  try {
+    return JSON.parse(localStorage.getItem(CONFIG.overridesStorageKey)) || {};
+  } catch {
+    return {};
+  }
 }
 
-/* Transforma as linhas cruas em registros tipados (uma vez por ingestão) */
-function construirRegistros() {
-    const { linhas, mapa } = estado;
-    const col = (r, campo) => { const i = mapa[campo]; return i >= 0 ? r[i] : undefined; };
-    const semChaves = mapa.pdv < 0 && mapa.nome < 0;
-    const ehTotal = (s) => /^(SUB ?)?TOTAL( GERAL)?$/.test(normalizar(s));
-    const out = [];
+function salvarOverrides(overrides) {
+  state.overrides = overrides;
+  localStorage.setItem(CONFIG.overridesStorageKey, JSON.stringify(overrides));
+}
 
-    for (let n = 0; n < linhas.length; n++) {
-        const r = linhas[n];
-        if (!r) continue;
-        const pdv = txt(col(r, 'pdv'));
-        const nome = txt(col(r, 'nome'));
-        if (!semChaves && !pdv && !nome) continue;      // linha sem identificação
-        if (ehTotal(pdv) || ehTotal(nome)) continue;    // linha de total do relatório
+function construirRegistros(worksheet) {
+  const matriz = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: false, defval: '' });
+  const linhaCabecalho = encontrarLinhaCabecalho(matriz);
+  const headers = (matriz[linhaCabecalho] || []).map((h) => String(h || '').trim()).filter(Boolean);
 
-        const status = txt(col(r, 'status'));
-        const cat = classificarStatus(status);
-        const gapRaw = txt(col(r, 'gap'));
-        const gapNum = paraNumero(col(r, 'gap'));
-        const gapPorColuna = gapNum !== null ? gapNum > 0 : classificarStatus(gapRaw) === 'gap';
+  const mapaAutomatico = mapearColunas(headers);
+  // Overrides salvos só valem se a coluna ainda existir neste arquivo.
+  const mapa = { ...mapaAutomatico };
+  Object.entries(state.overrides).forEach(([campo, header]) => {
+    if (headers.includes(header)) mapa[campo] = header;
+  });
 
-        out.push({
-            id: out.length, pdv, nome,
-            setor: txt(col(r, 'setor')) || 'Sem setor',
-            dono: txt(col(r, 'dono')),
-            status, cat, gapRaw, gapNum,
-            temGap: gapPorColuna || cat === 'gap',
-            fatEspRaw: col(r, 'fatEsp'), fatRealRaw: col(r, 'fatReal'),
-            busca: simples(`${pdv} ${nome}`)
-        });
+  const registros = [];
+  for (let i = linhaCabecalho + 1; i < matriz.length; i++) {
+    const linha = matriz[i];
+    if (!linha || linha.every((c) => String(c ?? '').trim() === '')) continue;
+
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = linha[idx]; });
+
+    const pdv = String(row[mapa.pdv] ?? '').trim();
+    const nome = String(row[mapa.nome] ?? '').trim();
+    if (!pdv && !nome) continue;
+    if (normalizeKey(pdv).includes('TOTAL') || normalizeKey(nome).includes('TOTAL')) continue;
+
+    registros.push({
+      pdv,
+      nome,
+      setor: String(row[mapa.setor] ?? '').trim() || '—',
+      responsavel: String(row[mapa.responsavel] ?? '').trim() || '—',
+      statusGeral: String(row[mapa.statusGeral] ?? '').trim(),
+      statusSku: String(row[mapa.statusSku] ?? '').trim(),
+      faturamentoReal: parseNumero(row[mapa.faturamentoReal]),
+      faturamentoEsperado: parseNumero(row[mapa.faturamentoEsperado]),
+    });
+  }
+  return { registros, mapa, mapaAutomatico, linhaCabecalho, headers };
+}
+
+// ---------------------------------------------------------------------------
+// CLASSIFICAÇÃO DE STATUS
+// ---------------------------------------------------------------------------
+
+/** "NOK" contém "OK" como substring — por isso o NOK/Zero precisa ser checado ANTES do OK. */
+function classificarGeral(status) {
+  const s = normalizeKey(status);
+  if (!s) return 'OUTRO';
+  if (s.includes('NOK') || s.includes('ZERO')) return 'NOK';
+  if (s.includes('OK') || s.includes('BATEU') || s.includes('OVER')) return 'OK';
+  return 'OUTRO';
+}
+
+function classificarSku(status) {
+  const s = normalizeKey(status);
+  if (!s) return 'OUTRO';
+  if (s.includes('GAP') || s.includes('FALTAM')) return 'GAP';
+  if (s.includes('OK') || s.includes('BATEU') || s.includes('OVER')) return 'OK';
+  return 'OUTRO';
+}
+
+function calcularKPIs(registros) {
+  const total = registros.length;
+  let giroOk = 0, vendaZero = 0, gapsSku = 0;
+  registros.forEach((r) => {
+    const classeGeral = classificarGeral(r.statusGeral);
+    if (classeGeral === 'OK') giroOk++;
+    else if (classeGeral === 'NOK') vendaZero++;
+    if (classificarSku(r.statusSku) === 'GAP') gapsSku++;
+  });
+  return { total, giroOk, vendaZero, gapsSku };
+}
+
+function agruparPorSetor(registros) {
+  const grupos = new Map();
+  registros.forEach((r) => {
+    const chave = r.setor || '—';
+    if (!grupos.has(chave)) {
+      grupos.set(chave, { setor: chave, responsavel: r.responsavel, total: 0, giroOk: 0, gaps: 0 });
     }
-    return out;
+    const g = grupos.get(chave);
+    g.total++;
+    if (classificarGeral(r.statusGeral) === 'OK') g.giroOk++;
+    if (classificarSku(r.statusSku) === 'GAP') g.gaps++;
+  });
+  const lista = Array.from(grupos.values()).map((g) => ({ ...g, atingimento: g.total ? g.giroOk / g.total : 0 }));
+  lista.sort((a, b) => a.atingimento - b.atingimento); // pior -> melhor
+  return lista;
 }
 
-async function carregarAba(nome) {
-    mostrarLoading('Processando base consolidada...', `Lendo a aba "${nome}"`, null);
-    await frame();
+// ---------------------------------------------------------------------------
+// PRNG DETERMINÍSTICO — curva "ilustrativa" do Raio-X (estável por PDV, sem backend)
+// ---------------------------------------------------------------------------
 
-    // Só a aba escolhida é decodificada: bem menos memória que ler o .xlsm inteiro
-    const wb = XLSX.read(estado.buffer, { type: 'array', sheets: nome, dense: true, cellStyles: false, cellHTML: false });
-    const ws = wb.Sheets[nome];
-    if (!ws) throw new Error(`A aba "${nome}" está vazia ou não pôde ser lida.`);
-
-    // Sem defval: linhas esparsas (não cria milhares de células vazias em planilhas "infladas")
-    const matriz = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, blankrows: false });
-    if (!matriz.length) throw new Error(`A aba "${nome}" não tem dados.`);
-
-    const idx = detectarCabecalho(matriz);
-    const posicao = idx >= 0 ? idx : 0;
-    const cab = matriz[posicao] || [];
-
-    estado.aba = nome;
-    estado.cabecalhoDetectado = idx >= 0;
-    estado.linhaCabecalho = posicao + 1;
-    estado.cabecalhos = Array.from({ length: cab.length }, (_, i) => txt(cab[i]).replace(/\s+/g, ' ') || `Coluna ${i + 1}`);
-    estado.linhas = matriz.slice(posicao + 1);
-    estado.mapa = autoMapear(estado.cabecalhos);
-    estado.selecionadoId = null;
-    estado.regGrafico = null;
-    resetarPainel();
-    recalcular();
+function hashString(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
+  return h >>> 0;
 }
 
-async function ingerir(file) {
-    if (estado.ocupado) return;
-    if (!/\.(xlsx|xlsm|xls)$/i.test(file.name)) {
-        toast('Formato não suportado. Use um arquivo .xlsx, .xlsm ou .xls.', 'erro');
-        return;
-    }
-    estado.ocupado = true;
-    mostrarLoading('Processando base consolidada...', 'Lendo o arquivo', 0);
-    try {
-        if (!(await garantirLib('XLSX'))) {
-            throw new Error('A biblioteca SheetJS não carregou. Coloque xlsx.full.min.js na pasta vendor/ ou libere o acesso à CDN.');
-        }
-        // Uint8Array é a forma documentada do SheetJS para type: 'array' (é só uma "janela" sobre o mesmo buffer, sem cópia)
-        estado.buffer = new Uint8Array(await lerArquivo(file, (p) => mostrarLoading('Processando base consolidada...', `Lendo o arquivo (${Math.round(p * 100)}%)`, p)));
-        await frame();
-        estado.arquivo = file.name;
-        estado.abas = XLSX.read(estado.buffer, { type: 'array', bookSheets: true }).SheetNames || [];
-        if (!estado.abas.length) throw new Error('O arquivo não tem abas.');
-        await carregarAba(escolherAba(estado.abas));
-
-        if (!estado.cabecalhoDetectado) {
-            toast('Não achei a linha de cabeçalho automaticamente e usei a primeira linha. Abra o Diagnóstico para conferir a aba.', 'aviso', 9000);
-        } else if (estado.mapa.pdv < 0 || estado.mapa.status < 0) {
-            toast('Algumas colunas importantes não foram encontradas. Abra o Diagnóstico para escolher.', 'aviso', 9000);
-        }
-    } catch (err) {
-        console.error(err);
-        const msg = /password|encrypt/i.test(String(err && err.message))
-            ? 'O arquivo está protegido por senha. Salve uma cópia sem senha e tente de novo.'
-            : `Não foi possível processar o arquivo: ${err && err.message ? err.message : err}`;
-        toast(msg, 'erro', 9000);
-    } finally {
-        estado.ocupado = false;
-        esconderLoading();
-    }
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-/* =====================================================================
-   KPIs, AGREGAÇÃO E RENDERIZAÇÃO
-   ===================================================================== */
-
-function recalcular() {
-    estado.registros = construirRegistros();
-    renderKPIs();
-    const n = estado.registros.length;
-    dom.fileStatus.innerHTML = `<span class="dot green"></span> Base ativa: ${fmtInt(n)} PDVs, aba "${escapeHTML(estado.aba)}"`;
-    dom.btnDiag.disabled = false;
-    mudarVisao(estado.modo);
+function gerarCurvaSimulada(registro) {
+  const rand = mulberry32(hashString(registro.pdv || registro.nome || 'seed'));
+  const base = classificarGeral(registro.statusGeral) === 'OK' ? 85 : 45;
+  const meses = [];
+  const valores = [];
+  const hoje = new Date();
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(hoje.getFullYear(), hoje.getMonth() - i, 1);
+    meses.push(d.toLocaleDateString('pt-BR', { month: 'short' }).replace('.', ''));
+    const ruido = (rand() - 0.5) * 20;
+    valores.push(Math.max(0, Math.min(100, Math.round(base + ruido))));
+  }
+  return { meses, valores };
 }
 
-function renderKPIs() {
-    const regs = estado.registros;
-    const total = regs.length;
-    let ok = 0, vz = 0, gap = 0;
-    for (const r of regs) {
-        if (r.cat === 'ok') ok++;
-        if (r.cat === 'vz' || r.cat === 'nok') vz++;
-        if (r.temGap) gap++;
-    }
-    const pct = (n) => total ? `${((n / total) * 100).toFixed(1).replace('.', ',')}% da base` : '\u00a0';
-    dom.kpiTotal.textContent = fmtInt(total);
-    dom.kpiOk.textContent = fmtInt(ok);
-    dom.kpiVz.textContent = fmtInt(vz);
-    dom.kpiGap.textContent = fmtInt(gap);
-    dom.kpiTotalSub.textContent = total ? `aba "${estado.aba}"` : 'registros na base';
-    dom.kpiOkSub.textContent = pct(ok);
-    dom.kpiVzSub.textContent = pct(vz);
-    dom.kpiGapSub.textContent = pct(gap);
+// ---------------------------------------------------------------------------
+// RENDERIZAÇÃO
+// ---------------------------------------------------------------------------
+
+function renderKpis(kpis) {
+  document.getElementById('kpiTotalEquip').textContent = kpis.total.toLocaleString('pt-BR');
+  document.getElementById('kpiGiroOk').textContent = kpis.giroOk.toLocaleString('pt-BR');
+  document.getElementById('kpiVendaZero').textContent = kpis.vendaZero.toLocaleString('pt-BR');
+  document.getElementById('kpiGapsSku').textContent = kpis.gapsSku.toLocaleString('pt-BR');
 }
 
-function moda(mapaContagem) {
-    let melhor = '', max = 0;
-    for (const [k, n] of mapaContagem) if (n > max) { melhor = k; max = n; }
-    return melhor;
+function renderGerencial(grupos) {
+  const tbody = document.getElementById('gerencialBody');
+  tbody.textContent = '';
+  if (!grupos.length) {
+    tbody.appendChild(el('tr', {}, el('td', { colspan: '7', class: 'vazio' }, 'Sem dados para exibir.')));
+    return;
+  }
+  grupos.forEach((g) => {
+    const pct = g.atingimento * 100;
+    const corBarra = pct >= 80 ? 'ok' : pct >= 50 ? 'atencao' : 'critico';
+    const tr = el('tr', { class: 'linha-clicavel', onclick: () => irParaSetor(g.setor) }, [
+      el('td', {}, g.setor),
+      el('td', {}, g.responsavel),
+      el('td', { class: 'num' }, String(g.total)),
+      el('td', { class: 'num' }, String(g.giroOk)),
+      el('td', {}, el('div', { class: 'meter' }, el('div', { class: `meter-fill ${corBarra}`, style: `width:${pct.toFixed(1)}%` }))),
+      el('td', { class: 'num' }, `${pct.toFixed(1)}%`),
+      el('td', { class: 'num gap' }, String(g.gaps)),
+    ]);
+    tbody.appendChild(tr);
+  });
 }
 
-function agruparPorSetor(regs) {
-    const grupos = new Map();
-    for (const r of regs) {
-        let g = grupos.get(r.setor);
-        if (!g) { g = { setor: r.setor, equip: 0, ok: 0, vz: 0, gap: 0, donos: new Map() }; grupos.set(r.setor, g); }
-        g.equip++;
-        if (r.cat === 'ok') g.ok++;
-        if (r.cat === 'vz' || r.cat === 'nok') g.vz++;
-        if (r.temGap) g.gap++;
-        if (r.dono) g.donos.set(r.dono, (g.donos.get(r.dono) || 0) + 1);
-    }
-    return [...grupos.values()]
-        .map((g) => ({ setor: g.setor, equip: g.equip, ok: g.ok, vz: g.vz, gap: g.gap, dono: moda(g.donos) || '—', ating: g.equip ? (g.ok / g.equip) * 100 : 0 }))
-        .sort((a, b) => a.ating - b.ating || b.gap - a.gap);   // piores primeiro: é onde a cobrança começa
+function irParaSetor(setor) {
+  state.filtroSetor = setor;
+  document.getElementById('searchInput').value = '';
+  ativarView('auditoria');
+  document.getElementById('filtroSetorAtivo').textContent = setor;
+  document.getElementById('filtroSetorAtivo').closest('.filtro-setor').hidden = false;
+  aplicarFiltros();
 }
 
-function renderVazio(colunas) {
-    dom.tbody.innerHTML = `
-        <tr><td colspan="${colunas}" class="empty-state">
-            <i class="ri-file-excel-line" aria-hidden="true"></i>
-            <p>Carregue o arquivo mestre para gerar a visão gerencial e a auditoria de PDVs.</p>
-            <button class="upload-btn" data-upload type="button">Selecionar arquivo</button>
-            <p class="hint">Você também pode arrastar o arquivo para esta janela.</p>
-        </td></tr>`;
-    dom.footer.classList.add('hidden');
+function limparFiltroSetor() {
+  state.filtroSetor = null;
+  document.getElementById('filtroSetorAtivo').closest('.filtro-setor').hidden = true;
+  aplicarFiltros();
 }
 
-function renderGerencial() {
-    dom.thead.innerHTML = `
-        <tr><th>Setor</th><th>Representante / dono</th><th class="num">Equipamentos</th><th class="num">Giro OK</th><th>Atingimento</th><th class="num">GAPs</th></tr>`;
-    if (!estado.registros.length) { renderVazio(6); return; }
+function renderAuditoria() {
+  const tbody = document.getElementById('auditoriaBody');
+  tbody.textContent = '';
+  const lista = state.pdvsFiltrados;
+  const visiveis = lista.slice(0, state.limiteRenderAuditoria);
 
-    estado.setores = agruparPorSetor(estado.registros);
-    dom.tbody.innerHTML = estado.setores.map((s, i) => {
-        const bate = s.ating >= CONFIG.META_ATINGIMENTO;
-        return `<tr class="clicavel" data-setor-i="${i}" tabindex="0" title="Ver os PDVs deste setor">
-            <td><strong>${escapeHTML(setorLabel(s.setor))}</strong></td>
-            <td>${escapeHTML(s.dono)}</td>
-            <td class="num">${fmtInt(s.equip)}</td>
-            <td class="num">${fmtInt(s.ok)}</td>
-            <td><div class="meter ${bate ? 'ok' : 'bad'}"><div class="meter-track"><div class="meter-bar" style="width:${Math.min(100, s.ating).toFixed(0)}%"></div></div><span>${s.ating.toFixed(0)}%</span></div></td>
-            <td class="num"><span class="badge ${s.gap ? 'danger' : 'ok'}">${fmtInt(s.gap)} PDV${s.gap === 1 ? '' : 's'}</span></td>
-        </tr>`;
-    }).join('');
+  if (!visiveis.length) {
+    tbody.appendChild(el('tr', {}, el('td', { colspan: '6', class: 'vazio' }, 'Nenhum PDV encontrado.')));
+  }
 
-    dom.count.textContent = `${fmtInt(estado.setores.length)} setores, do menor para o maior atingimento. Meta: ${CONFIG.META_ATINGIMENTO}%.`;
-    dom.btnMais.classList.add('hidden');
-    dom.footer.classList.remove('hidden');
-}
+  visiveis.forEach((r) => {
+    const classe = classificarGeral(r.statusGeral);
+    const tr = el('tr', {}, [
+      el('td', {}, r.pdv || '—'),
+      el('td', {}, r.nome || '—'),
+      el('td', {}, r.setor),
+      el('td', {}, el('span', { class: `badge badge-${classe.toLowerCase()}` }, r.statusGeral || '—')),
+      el('td', {}, r.statusSku || '—'),
+      el('td', {}, el('button', { class: 'btn-auditar', onclick: () => abrirRaioX(r) }, 'Auditar')),
+    ]);
+    tbody.appendChild(tr);
+  });
 
-function badgeStatus(r) {
-    if (r.cat !== 'outro' && r.cat !== 'vazio') return `<span class="badge ${CLASSE_CAT[r.cat]}">${ROTULO_CAT[r.cat]}</span>`;
-    return r.status ? `<span class="badge neutral">${escapeHTML(r.status)}</span>` : '<span class="badge neutral">Sem status</span>';
-}
-
-const fmtGap = (r) => r.gapNum !== null ? fmtInt(r.gapNum) : (r.gapRaw || '—');
-
-function celulaGap(r) {
-    if (r.temGap) return `<span class="badge danger">${escapeHTML(fmtGap(r))}</span>`;
-    return r.gapRaw ? `<span class="text-muted">${escapeHTML(fmtGap(r))}</span>` : '<span class="text-muted">—</span>';
+  const contador = document.getElementById('contadorAuditoria');
+  contador.textContent = `Mostrando ${visiveis.length} de ${lista.length} PDVs`;
+  document.getElementById('btnMostrarMais').hidden = visiveis.length >= lista.length;
 }
 
 function aplicarFiltros() {
-    const termo = simples(dom.busca.value.trim());
-    const cat = dom.filtroStatus.value;
-    estado.filtrados = estado.registros.filter((r) => {
-        if (termo && !r.busca.includes(termo)) return false;
-        if (estado.filtroSetor !== null && r.setor !== estado.filtroSetor) return false;
-        if (cat === 'todos') return true;
-        if (cat === 'gap') return r.temGap;
-        return r.cat === cat;
-    });
-    estado.visiveis = CONFIG.PAGINA;
-    renderPDVs();
+  const termo = normalizeKey(document.getElementById('searchInput').value);
+  const statusSel = document.getElementById('statusFilter').value;
+  let lista = state.registros;
+  if (state.filtroSetor) lista = lista.filter((r) => r.setor === state.filtroSetor);
+  if (termo) lista = lista.filter((r) => normalizeKey(r.nome).includes(termo) || normalizeKey(r.pdv).includes(termo));
+  if (statusSel !== 'todos') lista = lista.filter((r) => classificarGeral(r.statusGeral) === statusSel);
+  state.pdvsFiltrados = lista;
+  state.limiteRenderAuditoria = CONFIG.renderChunkSize;
+  renderAuditoria();
 }
 
-function renderPDVs() {
-    dom.thead.innerHTML = `
-        <tr><th>Cód. PDV</th><th>Nome fantasia</th><th>Setor</th><th>Status</th><th>GAP de SKU</th><th class="text-right">Ação</th></tr>`;
-    if (!estado.registros.length) { renderVazio(6); return; }
+function renderTudo() {
+  renderKpis(calcularKPIs(state.registros));
+  renderGerencial(agruparPorSetor(state.registros));
+  aplicarFiltros();
+  document.getElementById('emptyState').hidden = state.registros.length > 0;
+}
 
-    const lista = estado.filtrados;
-    const fatia = lista.slice(0, estado.visiveis);
-    if (!fatia.length) {
-        dom.tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><p>Nenhum PDV encontrado com esses filtros.</p></td></tr>';
-    } else {
-        dom.tbody.innerHTML = fatia.map((r) => `
-            <tr data-id="${r.id}"${r.id === estado.selecionadoId ? ' class="selected"' : ''}>
-                <td><strong>${escapeHTML(r.pdv || '—')}</strong></td>
-                <td>${escapeHTML(r.nome || '—')}</td>
-                <td>${escapeHTML(setorLabel(r.setor))}</td>
-                <td>${badgeStatus(r)}</td>
-                <td>${celulaGap(r)}</td>
-                <td class="text-right"><button class="action-sm" data-auditar="${r.id}" type="button">Auditar</button></td>
-            </tr>`).join('');
+// ---------------------------------------------------------------------------
+// RAIO-X (painel lateral + gráfico simulado + copiar pauta)
+// ---------------------------------------------------------------------------
+
+function abrirRaioX(registro) {
+  state.registroAtivo = registro;
+  document.getElementById('raioXNome').textContent = registro.nome || '—';
+  document.getElementById('raioXPdv').textContent = registro.pdv || '—';
+  document.getElementById('raioXSetor').textContent = registro.setor;
+  document.getElementById('raioXResponsavel').textContent = registro.responsavel;
+  document.getElementById('raioXStatusGeral').textContent = registro.statusGeral || '—';
+  document.getElementById('raioXStatusSku').textContent = registro.statusSku || '—';
+  document.getElementById('raioXFatEsperado').textContent = formatMoeda(registro.faturamentoEsperado);
+  document.getElementById('raioXFatReal').textContent = formatMoeda(registro.faturamentoReal);
+  renderGraficoRaioX(registro);
+  document.getElementById('painelRaioX').classList.add('aberto');
+  document.getElementById('overlayRaioX').hidden = false;
+}
+
+function fecharRaioX() {
+  document.getElementById('painelRaioX').classList.remove('aberto');
+  document.getElementById('overlayRaioX').hidden = true;
+}
+
+function renderGraficoRaioX(registro) {
+  const canvas = document.getElementById('chartRaioX');
+  if (!window.Chart) return;
+  const { meses, valores } = gerarCurvaSimulada(registro);
+  if (state.chartInstance) state.chartInstance.destroy();
+  state.chartInstance = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: meses,
+      datasets: [{
+        label: 'Cobertura estimada (%)',
+        data: valores,
+        borderColor: getCssVar('--color-accent') || '#f5b700',
+        backgroundColor: 'transparent',
+        tension: 0.35,
+        pointRadius: 3,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: { y: { min: 0, max: 100, ticks: { callback: (v) => v + '%' } } },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+function gerarTextoPauta(r) {
+  const classe = classificarGeral(r.statusGeral);
+  const situacao = classe === 'NOK' ? 'Venda Zero / NOK' : classe === 'OK' ? 'Regularizado' : 'Verificar status';
+  return `*[Alerta SOPI]* PDV ${r.pdv || '—'} - ${r.nome || 'Sem nome'} (${r.setor}). Situação: ${situacao}. `
+    + `Faturamento esperado: ${formatMoeda(r.faturamentoEsperado)} | real: ${formatMoeda(r.faturamentoReal)}. `
+    + `Verificar inaderência com o representante ${r.responsavel}.`;
+}
+
+async function copiarPauta() {
+  if (!state.registroAtivo) return;
+  const texto = gerarTextoPauta(state.registroAtivo);
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(texto);
+      mostrarToast('Pauta copiada para a área de transferência.');
+      return;
     }
-
-    const mostrando = Math.min(estado.visiveis, lista.length);
-    dom.count.textContent = lista.length
-        ? `Mostrando ${fmtInt(mostrando)} de ${fmtInt(lista.length)} PDVs`
-        : '0 PDVs';
-    dom.btnMais.classList.toggle('hidden', lista.length <= estado.visiveis);
-    dom.footer.classList.remove('hidden');
+    throw new Error('Clipboard API indisponível');
+  } catch {
+    copiarFallback(texto);
+  }
 }
 
-function atualizarChip() {
-    const ativo = estado.filtroSetor !== null;
-    dom.chipSetor.classList.toggle('hidden', !ativo);
-    if (ativo) dom.chipSetor.textContent = `${setorLabel(estado.filtroSetor)} \u00d7`;
+function copiarFallback(texto) {
+  const area = document.createElement('textarea');
+  area.value = texto;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.focus();
+  area.select();
+  let copiado = false;
+  try { copiado = document.execCommand('copy'); } catch { copiado = false; }
+  document.body.removeChild(area);
+  if (copiado) {
+    mostrarToast('Pauta copiada (modo compatibilidade).');
+  } else {
+    mostrarToast('Copiar automaticamente falhou — texto exibido para copiar manualmente.', 'erro');
+    abrirModalTexto(texto);
+  }
 }
 
-function mudarVisao(tipo) {
-    estado.modo = tipo;
-    const pdvs = tipo === 'pdvs';
-    document.querySelectorAll('.nav-link[data-view]').forEach((l) => {
-        const ativo = l.dataset.view === tipo;
-        l.classList.toggle('active', ativo);
-        if (ativo) l.setAttribute('aria-current', 'page'); else l.removeAttribute('aria-current');
-    });
-    dom.viewTitle.textContent = pdvs ? 'Auditoria analítica de PDVs' : 'Visão gerencial consolidada';
-    dom.toolbar.classList.toggle('hidden', !pdvs || !estado.registros.length);
-    dom.side.classList.toggle('hidden', !pdvs);
-    dom.split.classList.toggle('solo', !pdvs);
-    atualizarChip();
-    if (pdvs) aplicarFiltros(); else renderGerencial();
+function abrirModalTexto(texto) {
+  const modal = document.getElementById('modalTexto');
+  const textarea = document.getElementById('modalTextoArea');
+  textarea.value = texto;
+  modal.hidden = false;
+  textarea.focus();
+  textarea.select();
 }
 
-/* =====================================================================
-   RAIO-X DO PDV
-   ===================================================================== */
+// ---------------------------------------------------------------------------
+// DIAGNÓSTICO DE MAPEAMENTO (permite corrigir a coluna escolhida por campo)
+// ---------------------------------------------------------------------------
 
-function resetarPainel() {
-    dom.detId.textContent = '---';
-    dom.detContent.innerHTML = '<p class="text-muted">Clique em "Auditar" em qualquer linha para ver os dados do PDV, o faturamento e a pauta de cobrança.</p>';
-    dom.chartWrap.classList.add('hidden');
-    dom.chartNote.classList.add('hidden');
-    if (estado.chart) { estado.chart.destroy(); estado.chart = null; }
-}
-
-function blocoFaturamento(r) {
-    const esp = paraNumero(r.fatEspRaw), real = paraNumero(r.fatRealRaw);
-    if (esp === null || real === null || esp <= 0) return '';
-    const pct = (real / esp) * 100;
-    const dif = real - esp;
-    return `
-        <div class="detail-row"><span>Atingimento do faturamento</span><strong class="${pct >= 100 ? 'pos' : 'neg'}">${pct.toFixed(0)}%</strong></div>
-        <div class="meter ${pct >= 100 ? 'ok' : 'bad'} solo-meter"><div class="meter-track"><div class="meter-bar" style="width:${Math.min(100, pct).toFixed(0)}%"></div></div></div>
-        <div class="detail-row"><span>Diferença</span><strong class="${dif >= 0 ? 'pos' : 'neg'}">${escapeHTML(BRL.format(dif))}</strong></div>`;
-}
-
-function auditar(id) {
-    const r = estado.registros[id];
-    if (!r) return;
-    estado.selecionadoId = id;
-    estado.regGrafico = r;
-
-    dom.tbody.querySelectorAll('tr.selected').forEach((tr) => tr.classList.remove('selected'));
-    const linha = dom.tbody.querySelector(`tr[data-id="${id}"]`);
-    if (linha) linha.classList.add('selected');
-
-    dom.detId.textContent = `PDV ${r.pdv || '—'}`;
-    dom.detContent.innerHTML = `
-        <div class="detail-row"><span>Cliente</span><strong>${escapeHTML(r.nome || '—')}</strong></div>
-        <div class="detail-row"><span>Setor</span><strong>${escapeHTML(setorLabel(r.setor))}</strong></div>
-        <div class="detail-row"><span>Representante</span><strong>${escapeHTML(r.dono || '—')}</strong></div>
-        <div class="detail-row"><span>Status geral</span>${badgeStatus(r)}</div>
-        <div class="detail-row"><span>GAP de SKU</span><strong>${escapeHTML(fmtGap(r))}</strong></div>
-        <div class="detail-sep"></div>
-        <div class="detail-row"><span>Faturamento esperado</span><strong>${escapeHTML(fmtValor(r.fatEspRaw))}</strong></div>
-        <div class="detail-row"><span>Faturamento real</span><strong>${escapeHTML(fmtValor(r.fatRealRaw))}</strong></div>
-        ${blocoFaturamento(r)}
-        <button class="upload-btn w-full" id="btnPauta" type="button"><i class="ri-clipboard-line" aria-hidden="true"></i> Copiar pauta de cobrança</button>`;
-    $('btnPauta').addEventListener('click', () => copiarPauta(r));
-
-    desenharGrafico(r);
-}
-
-/* Curva simulada, mas estável: a mesma semente (código do PDV) gera sempre o mesmo desenho */
-function hashTexto(s) {
-    let h = 2166136261;
-    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
-    return h >>> 0;
-}
-function mulberry32(a) {
-    return function () {
-        a |= 0; a = (a + 0x6D2B79F5) | 0;
-        let t = Math.imul(a ^ (a >>> 15), 1 | a);
-        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-}
-function serieSimulada(r, n = 6) {
-    const rnd = mulberry32(hashTexto(`${r.pdv}|${r.nome}`));
-    const base = { ok: 88, gap: 58, nok: 42, vz: 20, outro: 65, vazio: 65 }[r.cat];
-    const lim = (v) => Math.max(5, Math.min(100, v));
-    let v = lim(base + (rnd() - 0.5) * 30);
-    const pontos = [];
-    for (let i = 0; i < n; i++) {
-        v = lim(v + (base - v) * 0.35 + (rnd() - 0.5) * 14);
-        pontos.push(Math.round(v));
-    }
-    return pontos;
-}
-function rotulosMeses(n = 6) {
-    const hoje = new Date();
-    return Array.from({ length: n }, (_, i) => {
-        const d = new Date(hoje.getFullYear(), hoje.getMonth() - (n - 1 - i), 1);
-        return d.toLocaleDateString('pt-BR', { month: 'short' }).replace('.', '');
-    });
-}
-function corComAlpha(cor, alpha) {
-    const m = /^#([0-9a-f]{6})$/i.exec(cor);
-    if (!m) return cor;
-    const n = parseInt(m[1], 16);
-    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
-}
-
-async function desenharGrafico(r) {
-    dom.chartWrap.classList.remove('hidden');
-    dom.chartNote.classList.remove('hidden');
-    dom.chartNote.textContent = 'Curva ilustrativa: ainda não usa histórico real do arquivo.';
-
-    if (!(await garantirLib('Chart'))) {
-        dom.chartWrap.classList.add('hidden');
-        dom.chartNote.textContent = 'Gráfico indisponível: o Chart.js não carregou (veja a pasta vendor/).';
-        return;
-    }
-    if (estado.chart) { estado.chart.destroy(); estado.chart = null; }
-    if (window.Chart.getChart) { const antigo = window.Chart.getChart(dom.canvas); if (antigo) antigo.destroy(); }
-
-    const css = getComputedStyle(document.documentElement);
-    const cor = (v) => css.getPropertyValue(v).trim();
-    const reduzir = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-    estado.chart = new window.Chart(dom.canvas.getContext('2d'), {
-        type: 'line',
-        data: {
-            labels: rotulosMeses(),
-            datasets: [{
-                label: 'Cobertura de SKU (simulada)',
-                data: serieSimulada(r),
-                borderColor: cor('--primary'),
-                backgroundColor: corComAlpha(cor('--primary'), 0.15),
-                fill: true, tension: 0.35, pointRadius: 3, borderWidth: 2
-            }]
-        },
-        options: {
-            responsive: true, maintainAspectRatio: false,
-            animation: reduzir ? false : { duration: 350 },
-            plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => `${c.parsed.y}%` } } },
-            scales: {
-                y: { min: 0, max: 100, ticks: { color: cor('--text-muted'), callback: (v) => `${v}%` }, grid: { color: cor('--border') } },
-                x: { ticks: { color: cor('--text-muted') }, grid: { display: false } }
-            }
-        }
-    });
-}
-
-/* ---------- Pauta de cobrança ---------- */
-function montarPauta(r) {
-    const saudacao = r.dono ? `Olá, ${r.dono}!` : 'Olá!';
-    return [
-        'PAUTA DE COBRANÇA: GAP DE SKU',
-        `${saudacao} Precisamos alinhar o seguinte PDV:`,
-        '',
-        `PDV: ${r.pdv || '—'} - ${r.nome || '—'}`,
-        `Setor: ${setorLabel(r.setor)}`,
-        `Status: ${r.status || '—'}`,
-        `GAP de SKU: ${fmtGap(r)}`,
-        `Faturamento: esperado ${fmtValor(r.fatEspRaw)} | real ${fmtValor(r.fatRealRaw)}`,
-        '',
-        'Pode confirmar o plano de ação e o prazo para regularizar? Obrigado!'
-    ].join('\n');
-}
-
-async function copiarTexto(texto) {
-    try {
-        if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(texto); return true; }
-    } catch (_) { /* cai no plano B */ }
-    try {   // plano B para contextos sem Clipboard API (ex.: arquivo aberto via file://)
-        const ta = document.createElement('textarea');
-        ta.value = texto;
-        ta.setAttribute('readonly', '');
-        ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
-        document.body.appendChild(ta);
-        ta.select();
-        const ok = document.execCommand('copy');
-        ta.remove();
-        return ok;
-    } catch (_) { return false; }
-}
-
-async function copiarPauta(r) {
-    const ok = await copiarTexto(montarPauta(r));
-    if (ok) toast('Pauta copiada. É só colar no Teams ou no WhatsApp.', 'ok');
-    else toast('Não consegui copiar automaticamente. Selecione e copie o texto manualmente.', 'erro', 7000);
-}
-
-/* =====================================================================
-   DIAGNÓSTICO (transparência do parser + ajuste manual de colunas)
-   ===================================================================== */
-
-function exemploColuna(i) {
-    if (i < 0) return '';
-    const limite = Math.min(estado.linhas.length, 200);
-    for (let n = 0; n < limite; n++) {
-        const v = txt(estado.linhas[n] && estado.linhas[n][i]);
-        if (v) return v.length > 40 ? `${v.slice(0, 40)}...` : v;
-    }
-    return '';
-}
-
-function renderDiagStatus() {
-    const cont = new Map();
-    for (const r of estado.registros) {
-        const chave = r.status || '(vazio)';
-        const e = cont.get(chave) || { n: 0, cat: r.cat };
-        e.n++;
-        cont.set(chave, e);
-    }
-    const linhas = [...cont].sort((a, b) => b[1].n - a[1].n);
-    const topo = linhas.slice(0, CONFIG.MAX_STATUS_DIAG);
-    dom.diagStatus.innerHTML = topo.map(([valor, e]) => `
-        <tr><td>${escapeHTML(valor)}</td><td><span class="badge ${CLASSE_CAT[e.cat]}">${ROTULO_CAT[e.cat]}</span></td><td class="num">${fmtInt(e.n)}</td></tr>`).join('')
-        + (linhas.length > topo.length ? `<tr><td colspan="3" class="text-muted">+ ${linhas.length - topo.length} valores menos frequentes</td></tr>` : '')
-        || '<tr><td colspan="3" class="text-muted">Nenhum registro.</td></tr>';
-}
-
-function renderDiagnostico() {
-    dom.diagSheet.innerHTML = estado.abas.map((a) => `<option value="${escapeHTML(a)}"${a === estado.aba ? ' selected' : ''}>${escapeHTML(a)}</option>`).join('');
-    const cab = estado.cabecalhoDetectado
-        ? `Cabeçalho detectado na ${estado.linhaCabecalho}ª linha com conteúdo.`
-        : 'Cabeçalho não detectado: usei a primeira linha.';
-    dom.diagInfo.textContent = `Arquivo: ${estado.arquivo}. ${cab} ${fmtInt(estado.linhas.length)} linhas lidas, ${fmtInt(estado.registros.length)} PDVs válidos.`;
-
-    dom.diagMap.innerHTML = CAMPOS.map((c) => {
-        const sel = estado.mapa[c.id];
-        const opcoes = ['<option value="-1">Não usar</option>']
-            .concat(estado.cabecalhos.map((h, i) => `<option value="${i}"${i === sel ? ' selected' : ''}>${escapeHTML(h)}</option>`)).join('');
-        return `<tr>
-            <td><strong>${c.rotulo}</strong></td>
-            <td><select class="select" data-campo="${c.id}">${opcoes}</select></td>
-            <td class="text-muted" data-exemplo="${c.id}">${escapeHTML(exemploColuna(sel)) || '—'}</td>
-        </tr>`;
-    }).join('');
-    renderDiagStatus();
-}
+const ROTULOS_CAMPO = {
+  pdv: 'Código do PDV',
+  nome: 'Nome / Razão Social',
+  setor: 'Setor / GV',
+  responsavel: 'Responsável',
+  statusGeral: 'Status Geral (Giro)',
+  statusSku: 'Status SKU',
+  faturamentoReal: 'Faturamento Real',
+  faturamentoEsperado: 'Faturamento Esperado',
+};
 
 function abrirDiagnostico() {
-    if (!estado.abas.length) return;
-    renderDiagnostico();
-    dom.modal.classList.remove('hidden');
-    dom.diagOk.focus();
+  const modal = document.getElementById('diagnosticoModal');
+  const corpo = document.getElementById('diagnosticoCorpo');
+  corpo.textContent = '';
+
+  if (!state.diagnostico) {
+    corpo.appendChild(el('p', { class: 'vazio' }, 'Carregue uma planilha para ver o diagnóstico de mapeamento.'));
+    modal.hidden = false;
+    return;
+  }
+
+  const { nomeAba, linhaCabecalho, headers, mapa } = state.diagnostico;
+  corpo.appendChild(el('p', {}, [el('strong', {}, 'Aba usada: '), nomeAba]));
+  corpo.appendChild(el('p', {}, [el('strong', {}, 'Linha do cabeçalho: '), String(linhaCabecalho + 1)]));
+
+  const tabela = el('table', { class: 'tabela-diagnostico' });
+  const thead = el('thead', {}, el('tr', {}, [el('th', {}, 'Campo'), el('th', {}, 'Coluna detectada'), el('th', {}, 'Trocar')]));
+  const tbody = el('tbody');
+
+  Object.entries(ROTULOS_CAMPO).forEach(([campo, rotulo]) => {
+    const colunaAtual = mapa[campo] || '(não encontrada)';
+    const select = el('select', { dataset: { campo } }, [
+      el('option', { value: '' }, '— manter automático —'),
+      ...headers.map((h) => el('option', { value: h, ...(h === mapa[campo] ? { selected: 'selected' } : {}) }, h)),
+    ]);
+    tbody.appendChild(el('tr', {}, [
+      el('td', {}, rotulo),
+      el('td', {}, colunaAtual),
+      el('td', {}, select),
+    ]));
+  });
+
+  tabela.appendChild(thead);
+  tabela.appendChild(tbody);
+  corpo.appendChild(tabela);
+  modal.hidden = false;
 }
+
+function salvarDiagnostico() {
+  const selects = document.querySelectorAll('#diagnosticoCorpo select');
+  const overrides = {};
+  selects.forEach((sel) => {
+    if (sel.value) overrides[sel.dataset.campo] = sel.value;
+  });
+  salvarOverrides(overrides);
+  if (state.worksheetAtual) reprocessarComOverrides();
+  fecharDiagnostico();
+  mostrarToast('Mapeamento salvo. Dados reprocessados.');
+}
+
 function fecharDiagnostico() {
-    dom.modal.classList.add('hidden');
-    dom.btnDiag.focus();
+  document.getElementById('diagnosticoModal').hidden = true;
 }
 
-/* =====================================================================
-   EVENTOS
-   ===================================================================== */
-
-dom.themeToggle.addEventListener('click', () => {
-    aplicarTema(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light');
-});
-
-dom.btnUpload.addEventListener('click', () => dom.fileInput.click());
-dom.fileInput.addEventListener('change', (e) => {
-    const arquivo = e.target.files && e.target.files[0];
-    e.target.value = '';      // permite escolher o mesmo arquivo de novo
-    if (arquivo) ingerir(arquivo);
-});
-
-document.querySelectorAll('.nav-link[data-view]').forEach((a) => {
-    a.addEventListener('click', (e) => {
-        e.preventDefault();
-        if (a.dataset.view !== estado.modo) estado.filtroSetor = null;
-        mudarVisao(a.dataset.view);
-    });
-});
-
-/* Tabela: delegação de eventos (nada de onclick inline com dados do Excel) */
-dom.tbody.addEventListener('click', (e) => {
-    if (e.target.closest('[data-upload]')) { dom.fileInput.click(); return; }
-    const btn = e.target.closest('[data-auditar]');
-    if (btn) { auditar(Number(btn.dataset.auditar)); return; }
-    const linha = e.target.closest('tr[data-setor-i]');
-    if (linha) irParaSetor(Number(linha.dataset.setorI));
-});
-dom.tbody.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return;
-    const linha = e.target.closest('tr[data-setor-i]');
-    if (linha) irParaSetor(Number(linha.dataset.setorI));
-});
-function irParaSetor(i) {
-    const s = estado.setores[i];
-    if (!s) return;
-    estado.filtroSetor = s.setor;
-    mudarVisao('pdvs');
+function reprocessarComOverrides() {
+  const { registros, mapa, mapaAutomatico, linhaCabecalho, headers } = construirRegistros(state.worksheetAtual);
+  state.registros = registros;
+  state.diagnostico = { nomeAba: state.diagnostico.nomeAba, linhaCabecalho, headers, mapa, mapaAutomatico };
+  renderTudo();
+  atualizarBadge(registros.length);
 }
 
-let temporizadorBusca = null;
-dom.busca.addEventListener('input', () => {
-    clearTimeout(temporizadorBusca);
-    temporizadorBusca = setTimeout(() => { if (estado.modo === 'pdvs') aplicarFiltros(); }, 150);
-});
-dom.filtroStatus.addEventListener('change', () => { if (estado.modo === 'pdvs') aplicarFiltros(); });
-dom.chipSetor.addEventListener('click', () => { estado.filtroSetor = null; atualizarChip(); aplicarFiltros(); });
-dom.btnMais.addEventListener('click', () => { estado.visiveis += CONFIG.PAGINA; renderPDVs(); });
+// ---------------------------------------------------------------------------
+// TOAST / LOADING
+// ---------------------------------------------------------------------------
 
-/* Diagnóstico */
-dom.btnDiag.addEventListener('click', abrirDiagnostico);
-dom.diagClose.addEventListener('click', fecharDiagnostico);
-dom.diagOk.addEventListener('click', fecharDiagnostico);
-dom.modal.addEventListener('click', (e) => { if (e.target === dom.modal) fecharDiagnostico(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !dom.modal.classList.contains('hidden')) fecharDiagnostico(); });
+function mostrarToast(mensagem, tipo = 'sucesso') {
+  const container = document.getElementById('toastContainer');
+  const toast = el('div', { class: `toast toast-${tipo}` }, mensagem);
+  container.appendChild(toast);
+  setTimeout(() => toast.classList.add('saindo'), 3200);
+  setTimeout(() => toast.remove(), 3600);
+}
 
-dom.diagMap.addEventListener('change', (e) => {
-    const sel = e.target.closest('select[data-campo]');
-    if (!sel) return;
-    const campo = sel.dataset.campo;
-    const idx = Number(sel.value);
-    estado.mapa[campo] = idx;
-    salvarMapaManual(campo, idx >= 0 ? normalizar(estado.cabecalhos[idx]) : '');
-    recalcular();
-    const celula = dom.diagMap.querySelector(`[data-exemplo="${campo}"]`);
-    if (celula) celula.textContent = exemploColuna(idx) || '—';
-    renderDiagStatus();
-    dom.diagInfo.textContent = dom.diagInfo.textContent.replace(/[\d.]+ PDVs válidos/, `${fmtInt(estado.registros.length)} PDVs válidos`);
-});
+function mostrarLoading(mensagem) {
+  document.getElementById('loadingMensagem').textContent = mensagem;
+  document.getElementById('loadingOverlay').hidden = false;
+}
 
-dom.diagSheet.addEventListener('change', async () => {
-    if (!dom.diagSheet.value) return;
-    try {
-        await carregarAba(dom.diagSheet.value);
-        renderDiagnostico();
-    } catch (err) {
-        console.error(err);
-        toast(`Não foi possível ler essa aba: ${err.message}`, 'erro', 8000);
-    } finally {
-        esconderLoading();
-    }
-});
+function esconderLoading() {
+  document.getElementById('loadingOverlay').hidden = true;
+}
 
-dom.diagReset.addEventListener('click', () => {
-    store.set(CONFIG.CHAVE_MAPA, '{}');
-    estado.mapa = autoMapear(estado.cabecalhos);
-    recalcular();
-    renderDiagnostico();
-    toast('Detecção automática restaurada.', 'ok');
-});
+function atualizarBadge(qtd) {
+  const badge = document.getElementById('statusBadge');
+  badge.textContent = qtd > 0 ? `Pipeline Ativo (${qtd.toLocaleString('pt-BR')} registros)` : 'Aguardando Base';
+  badge.classList.toggle('badge-ativo', qtd > 0);
+}
 
-/* Arrastar e soltar em qualquer lugar da janela */
-const temArquivo = (e) => !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
-let profundidadeDrag = 0;
-window.addEventListener('dragenter', (e) => {
-    if (!temArquivo(e)) return;
-    e.preventDefault();
-    profundidadeDrag++;
-    dom.dropHint.classList.remove('hidden');
-});
-window.addEventListener('dragleave', (e) => {
-    if (!temArquivo(e)) return;
-    profundidadeDrag = Math.max(0, profundidadeDrag - 1);
-    if (!profundidadeDrag) dom.dropHint.classList.add('hidden');
-});
-window.addEventListener('dragover', (e) => { if (temArquivo(e)) e.preventDefault(); });
-window.addEventListener('drop', (e) => {
-    if (!temArquivo(e)) return;
-    e.preventDefault();
-    profundidadeDrag = 0;
-    dom.dropHint.classList.add('hidden');
-    const arquivo = e.dataTransfer.files && e.dataTransfer.files[0];
-    if (arquivo) ingerir(arquivo);
-});
+function habilitarNavegacao(ativo) {
+  document.getElementById('navGerencial').disabled = !ativo;
+  document.getElementById('navAuditoria').disabled = !ativo;
+}
 
-/* Rede de segurança: nenhum erro fica silencioso */
-window.addEventListener('unhandledrejection', (e) => {
-    console.error(e.reason);
-    toast(`Erro inesperado: ${e.reason && e.reason.message ? e.reason.message : e.reason}`, 'erro', 8000);
-});
-window.addEventListener('error', (e) => {
-    console.error(e.error || e.message);
-    toast(`Erro inesperado: ${e.message}`, 'erro', 8000);
-});
+// ---------------------------------------------------------------------------
+// UPLOAD / ETL
+// ---------------------------------------------------------------------------
 
-/* ---------- Início ---------- */
-aplicarTema(store.get('theme', 'dark'));
-mudarVisao('gerencial');
-garantirLib('XLSX');    // pré-carrega em segundo plano para o primeiro upload ser imediato
+async function processarArquivo(file) {
+  mostrarLoading('Descodificando matrizes binárias na RAM...');
+  try {
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
+    const nomeAba = encontrarAbaAlvo(workbook);
+    const worksheet = workbook.Sheets[nomeAba];
+    state.worksheetAtual = worksheet;
+
+    const { registros, mapa, mapaAutomatico, linhaCabecalho, headers } = construirRegistros(worksheet);
+    state.registros = registros;
+    state.diagnostico = { nomeAba, linhaCabecalho, headers, mapa, mapaAutomatico };
+    state.filtroSetor = null;
+    document.getElementById('filtroSetorAtivo').closest('.filtro-setor').hidden = true;
+
+    renderTudo();
+    atualizarBadge(registros.length);
+    habilitarNavegacao(true);
+    mostrarToast(`Base carregada: ${registros.length.toLocaleString('pt-BR')} registros na aba "${nomeAba}".`);
+  } catch (err) {
+    console.error(err);
+    mostrarToast('Erro ao processar o arquivo: ' + err.message, 'erro');
+  } finally {
+    esconderLoading();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NAVEGAÇÃO / TEMA / INICIALIZAÇÃO
+// ---------------------------------------------------------------------------
+
+function ativarView(nomeView) {
+  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('ativa', v.dataset.view === nomeView));
+  document.querySelectorAll('.nav-btn').forEach((b) => b.classList.toggle('ativo', b.dataset.view === nomeView));
+}
+
+function aplicarTema(tema) {
+  document.documentElement.setAttribute('data-theme', tema);
+  localStorage.setItem(CONFIG.themeStorageKey, tema);
+  const icone = document.getElementById('iconeTema');
+  if (icone) icone.className = tema === 'light' ? 'ri-moon-line' : 'ri-sun-line';
+}
+
+function initTema() {
+  aplicarTema(localStorage.getItem(CONFIG.themeStorageKey) || 'dark');
+  document.getElementById('btnTheme').addEventListener('click', () => {
+    const atual = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    aplicarTema(atual);
+    if (state.registroAtivo) renderGraficoRaioX(state.registroAtivo);
+  });
+}
+
+function initUpload() {
+  const input = document.getElementById('fileInput');
+  const btn = document.getElementById('btnUpload');
+  btn.addEventListener('click', () => input.click());
+  input.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) processarArquivo(file);
+    input.value = ''; // permite escolher o mesmo arquivo de novo e ainda disparar 'change'
+  });
+
+  ['dragenter', 'dragover'].forEach((evt) => window.addEventListener(evt, (e) => { e.preventDefault(); document.body.classList.add('arrastando'); }));
+  ['dragleave', 'drop'].forEach((evt) => window.addEventListener(evt, (e) => { e.preventDefault(); document.body.classList.remove('arrastando'); }));
+  window.addEventListener('drop', (e) => {
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) processarArquivo(file);
+  });
+}
+
+function initNavegacao() {
+  document.querySelectorAll('.nav-btn').forEach((btn) => {
+    btn.addEventListener('click', () => ativarView(btn.dataset.view));
+  });
+}
+
+function initFiltros() {
+  document.getElementById('searchInput').addEventListener('input', aplicarFiltros);
+  document.getElementById('statusFilter').addEventListener('change', aplicarFiltros);
+  document.getElementById('btnMostrarMais').addEventListener('click', () => {
+    state.limiteRenderAuditoria += CONFIG.renderChunkSize;
+    renderAuditoria();
+  });
+  document.getElementById('btnLimparFiltroSetor').addEventListener('click', limparFiltroSetor);
+}
+
+function initRaioX() {
+  document.getElementById('btnFecharRaioX').addEventListener('click', fecharRaioX);
+  document.getElementById('overlayRaioX').addEventListener('click', fecharRaioX);
+  document.getElementById('btnCopiarPauta').addEventListener('click', copiarPauta);
+}
+
+function initDiagnostico() {
+  document.getElementById('btnDiagnostico').addEventListener('click', abrirDiagnostico);
+  document.getElementById('btnFecharDiagnostico').addEventListener('click', fecharDiagnostico);
+  document.getElementById('btnSalvarDiagnostico').addEventListener('click', salvarDiagnostico);
+  document.getElementById('btnFecharModalTexto').addEventListener('click', () => { document.getElementById('modalTexto').hidden = true; });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  initTema();
+  initUpload();
+  initNavegacao();
+  initFiltros();
+  initRaioX();
+  initDiagnostico();
+
+  const prontas = window.bibliotecasProntas || Promise.resolve();
+  prontas.then(() => {
+    if (!window.XLSX) mostrarToast('SheetJS não carregou (vendor/ e CDN indisponíveis). Verifique a rede.', 'erro');
+    if (!window.Chart) mostrarToast('Chart.js não carregou — o gráfico do Raio-X ficará indisponível.', 'erro');
+  });
+});
