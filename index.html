@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>SalesLab · Ambev — Command Center Operacional</title>
 <meta name="description" content="Painel operacional 100% client-side para consolidação de equipamentos, faturamento e status de SKUs por PDV." />
+<meta name="theme-color" content="#0b0d12">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
 
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/remixicon@4.5.0/fonts/remixicon.css">
@@ -44,6 +47,7 @@
       <span id="statusBadge" class="status-badge">Aguardando Base</span>
       <input type="file" id="fileInput" accept=".xlsx,.xlsm,.xls" hidden>
       <button id="btnUpload" class="btn btn-primary"><i class="ri-upload-2-line"></i> Carregar Base Mestre (26MB)</button>
+      <button id="btnLimparBase" class="btn" hidden><i class="ri-delete-bin-line"></i> Limpar base</button>
       <button id="btnDiagnostico" class="btn"><i class="ri-stethoscope-line"></i> Diagnóstico</button>
       <button id="btnTheme" class="btn btn-icon" title="Alternar tema" aria-label="Alternar tema claro/escuro">
         <i id="iconeTema" class="ri-sun-line"></i>
@@ -69,20 +73,24 @@
 
     <section class="kpi-grid" aria-label="Indicadores globais">
       <div class="kpi-card">
-        <span class="kpi-label">Total de Equipamentos</span>
+        <span class="kpi-label">Total de Equipamentos <i class="ri-information-line kpi-info" tabindex="0" title="Contagem de linhas válidas da base (exclui a linha de TOTAL e linhas vazias)."></i></span>
         <span class="kpi-value" id="kpiTotalEquip">0</span>
+        <span class="kpi-delta" id="kpiTotalEquipDelta"></span>
       </div>
       <div class="kpi-card kpi-ok">
-        <span class="kpi-label">Giro OK</span>
+        <span class="kpi-label">Giro OK <i class="ri-information-line kpi-info" tabindex="0" title="PDVs cujo Status Geral contém OK, BATEU ou OVER (NOK/Venda Zero nunca conta como OK)."></i></span>
         <span class="kpi-value" id="kpiGiroOk">0</span>
+        <span class="kpi-delta" id="kpiGiroOkDelta"></span>
       </div>
       <div class="kpi-card kpi-danger">
-        <span class="kpi-label">Venda Zero / NOK</span>
+        <span class="kpi-label">Venda Zero / NOK <i class="ri-information-line kpi-info" tabindex="0" title="PDVs cujo Status Geral contém NOK ou ZERO."></i></span>
         <span class="kpi-value" id="kpiVendaZero">0</span>
+        <span class="kpi-delta" id="kpiVendaZeroDelta"></span>
       </div>
       <div class="kpi-card kpi-warning">
-        <span class="kpi-label">GAPs Críticos SKU</span>
+        <span class="kpi-label">GAPs Críticos SKU <i class="ri-information-line kpi-info" tabindex="0" title="PDVs cujo Status SKU contém GAP ou FALTAM."></i></span>
         <span class="kpi-value" id="kpiGapsSku">0</span>
+        <span class="kpi-delta" id="kpiGapsSkuDelta"></span>
       </div>
     </section>
 
@@ -124,16 +132,24 @@
         </select>
       </div>
       <div class="table-wrap">
-        <table>
+        <table id="tabelaAuditoria">
           <thead>
-            <tr><th>PDV</th><th>Nome</th><th>Setor</th><th>Status Geral</th><th>Status SKU</th><th>Ação</th></tr>
+            <tr>
+              <th data-campo="pdv" tabindex="0" role="button" aria-label="Ordenar por PDV">PDV <span class="indicador-ordenacao"></span></th>
+              <th data-campo="nome" tabindex="0" role="button" aria-label="Ordenar por Nome">Nome <span class="indicador-ordenacao"></span></th>
+              <th data-campo="setor" tabindex="0" role="button" aria-label="Ordenar por Setor">Setor <span class="indicador-ordenacao"></span></th>
+              <th data-campo="statusGeral" tabindex="0" role="button" aria-label="Ordenar por Status Geral">Status Geral <span class="indicador-ordenacao"></span></th>
+              <th data-campo="statusSku" tabindex="0" role="button" aria-label="Ordenar por Status SKU">Status SKU <span class="indicador-ordenacao"></span></th>
+              <th>Ação</th>
+            </tr>
           </thead>
           <tbody id="auditoriaBody"></tbody>
         </table>
       </div>
-      <div style="display:flex; align-items:center; gap:12px;">
+      <div class="rodape-auditoria">
         <span class="contador" id="contadorAuditoria">Mostrando 0 de 0 PDVs</span>
         <button id="btnMostrarMais" class="btn" hidden>Mostrar mais</button>
+        <button id="btnExportarCsv" class="btn" hidden><i class="ri-download-2-line"></i> Exportar CSV</button>
       </div>
     </section>
 
@@ -142,7 +158,7 @@
 
 <!-- Painel Raio-X -->
 <div id="overlayRaioX" class="overlay-raiox" hidden></div>
-<aside id="painelRaioX" class="painel-raiox" aria-label="Raio-X do PDV">
+<aside id="painelRaioX" class="painel-raiox" role="dialog" aria-modal="true" aria-label="Raio-X do PDV">
   <div class="painel-raiox-header">
     <div>
       <h3 id="raioXNome">—</h3>
@@ -171,8 +187,8 @@
 
 <!-- Modal Diagnóstico -->
 <div id="diagnosticoModal" class="modal-overlay" hidden>
-  <div class="modal-card">
-    <h3>Diagnóstico de Mapeamento</h3>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="tituloDiagnostico">
+    <h3 id="tituloDiagnostico">Diagnóstico de Mapeamento</h3>
     <div id="diagnosticoCorpo"></div>
     <div class="modal-actions">
       <button id="btnFecharDiagnostico" class="btn">Fechar</button>
@@ -183,8 +199,8 @@
 
 <!-- Modal texto (fallback de cópia manual) -->
 <div id="modalTexto" class="modal-overlay" hidden>
-  <div class="modal-card">
-    <h3>Copie o texto abaixo</h3>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="tituloModalTexto">
+    <h3 id="tituloModalTexto">Copie o texto abaixo</h3>
     <textarea id="modalTextoArea" readonly></textarea>
     <div class="modal-actions">
       <button id="btnFecharModalTexto" class="btn btn-primary">Fechar</button>
@@ -199,6 +215,7 @@
 
 <div id="toastContainer" aria-live="polite"></div>
 
+<script src="etl.js"></script>
 <script src="script.js"></script>
 </body>
 </html>
