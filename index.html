@@ -1,40 +1,47 @@
 <!DOCTYPE html>
-<html lang="pt-PT" data-theme="dark">
+<html lang="pt-BR" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SalesLab Ops | Central Executiva Ambev</title>
+
+    <!-- Aplica o tema salvo antes da primeira pintura (evita "flash" claro/escuro) -->
+    <script>
+        try { document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark'); } catch (e) {}
+    </script>
+
     <link rel="stylesheet" href="style.css">
-    <!-- SheetJS & Chart.js -->
-    <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Ícones e fonte são opcionais: se a rede bloquear, o app continua funcionando.
+         SheetJS e Chart.js são carregados pelo script.js (primeiro de vendor/, depois da CDN). -->
     <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
     <div class="app-layout">
+
         <!-- Sidebar -->
-        <nav class="sidebar">
+        <nav class="sidebar" aria-label="Navegação principal">
             <div class="sidebar-header">
                 <div class="brand">
-                    <i class="ri-hexagon-fill"></i>
+                    <i class="ri-hexagon-fill" aria-hidden="true"></i>
                     <span>SalesLab <b>Ambev</b></span>
                 </div>
             </div>
 
             <div class="sidebar-menu">
-                <span class="menu-label">Módulos Operacionais</span>
-                <a href="#" class="nav-link active" onclick="mudarVisao('gerencial', event)"><i class="ri-pie-chart-2-line"></i> Visão Gerencial (Setores)</a>
-                <a href="#" class="nav-link" onclick="mudarVisao('pdvs', event)"><i class="ri-store-2-line"></i> Auditoria de PDVs</a>
-                
+                <span class="menu-label">Módulos operacionais</span>
+                <a href="#" class="nav-link active" data-view="gerencial"><i class="ri-pie-chart-2-line" aria-hidden="true"></i> Visão gerencial</a>
+                <a href="#" class="nav-link" data-view="pdvs"><i class="ri-store-2-line" aria-hidden="true"></i> Auditoria de PDVs</a>
+
                 <span class="menu-label mt-4">Integrações</span>
-                <a href="#" class="nav-link disabled"><i class="ri-robot-line"></i> Copilot Studio <span class="badge-soon">Ativo</span></a>
-                <a href="#" class="nav-link disabled"><i class="ri-flow-chart"></i> Power Automate <span class="badge-soon">Sync</span></a>
+                <span class="nav-link disabled" aria-disabled="true"><i class="ri-robot-line" aria-hidden="true"></i> Copilot Studio <span class="badge-soon">Em breve</span></span>
+                <span class="nav-link disabled" aria-disabled="true"><i class="ri-flow-chart" aria-hidden="true"></i> Power Automate <span class="badge-soon">Em breve</span></span>
             </div>
 
             <div class="sidebar-footer">
                 <div class="user-profile">
-                    <div class="avatar">JN</div>
+                    <div class="avatar" aria-hidden="true">JN</div>
                     <div class="user-details">
                         <strong>João Neto</strong>
                         <span>Engenharia de Dados</span>
@@ -43,122 +50,166 @@
             </div>
         </nav>
 
-        <!-- Main Workspace -->
+        <!-- Área principal -->
         <main class="workspace">
             <header class="topbar">
                 <div class="topbar-left">
-                    <h2 id="view-title">Visão Gerencial Consolidada</h2>
-                    <span class="status-badge" id="file-status"><span class="dot red"></span> Aguardando Ficheiro Mestre (.xlsm)</span>
+                    <h2 id="view-title">Visão gerencial consolidada</h2>
+                    <span class="status-badge" id="file-status" role="status"><span class="dot red"></span> Aguardando arquivo mestre (.xlsm, .xlsx ou .xls)</span>
                 </div>
 
                 <div class="topbar-right">
-                    <button class="theme-toggle" id="theme-toggle" title="Alternar Tema"><i class="ri-moon-line"></i></button>
-                    <button class="upload-btn" onclick="document.getElementById('excelFileInput').click()">
-                        <i class="ri-file-excel-2-line"></i> Ingerir Ficheiro Mestre (26MB)
-                    </button>
-                    <input type="file" id="excelFileInput" accept=".xlsx, .xlsm, .xls" class="hidden">
+                    <button class="theme-toggle" id="theme-toggle" title="Alternar tema" aria-label="Alternar tema"><i class="ri-moon-line" aria-hidden="true"></i></button>
+                    <button class="ghost-btn" id="btn-diag" disabled title="Ver como o arquivo foi lido e ajustar colunas"><i class="ri-settings-3-line" aria-hidden="true"></i> Diagnóstico</button>
+                    <button class="upload-btn" id="btn-upload" type="button"><i class="ri-file-excel-2-line" aria-hidden="true"></i> Carregar arquivo mestre</button>
+                    <input type="file" id="excelFileInput" accept=".xlsx,.xlsm,.xls" class="hidden">
                 </div>
             </header>
 
             <div class="dashboard-content">
-                
-                <!-- KPIs Globais -->
-                <div class="kpi-grid">
-                    <div class="kpi-card">
-                        <div class="kpi-icon blue"><i class="ri-fridge-line"></i></div>
+
+                <!-- KPIs globais -->
+                <section class="kpi-grid" aria-label="Indicadores globais">
+                    <article class="kpi-card">
+                        <div class="kpi-icon blue"><i class="ri-fridge-line" aria-hidden="true"></i></div>
                         <div class="kpi-info">
-                            <span>Total Equipamentos</span>
+                            <span>Total de equipamentos</span>
                             <h3 id="kpi-total">0</h3>
+                            <small id="kpi-total-sub">registros na base</small>
                         </div>
-                    </div>
-                    <div class="kpi-card">
-                        <div class="kpi-icon green"><i class="ri-checkbox-circle-line"></i></div>
+                    </article>
+                    <article class="kpi-card">
+                        <div class="kpi-icon green"><i class="ri-checkbox-circle-line" aria-hidden="true"></i></div>
                         <div class="kpi-info">
-                            <span>Giro OK (Aderentes)</span>
+                            <span>Giro OK (aderentes)</span>
                             <h3 id="kpi-ok">0</h3>
+                            <small id="kpi-ok-sub">&nbsp;</small>
                         </div>
-                    </div>
-                    <div class="kpi-card">
-                        <div class="kpi-icon orange"><i class="ri-error-warning-line"></i></div>
+                    </article>
+                    <article class="kpi-card">
+                        <div class="kpi-icon orange"><i class="ri-error-warning-line" aria-hidden="true"></i></div>
                         <div class="kpi-info">
-                            <span>Venda Zero / NOK</span>
+                            <span>Venda zero / NOK</span>
                             <h3 id="kpi-vz">0</h3>
+                            <small id="kpi-vz-sub">&nbsp;</small>
                         </div>
-                    </div>
-                    <div class="kpi-card">
-                        <div class="kpi-icon red"><i class="ri-alert-line"></i></div>
+                    </article>
+                    <article class="kpi-card">
+                        <div class="kpi-icon red"><i class="ri-alert-line" aria-hidden="true"></i></div>
                         <div class="kpi-info">
-                            <span>GAPs Críticos SKU</span>
+                            <span>GAPs críticos de SKU</span>
                             <h3 id="kpi-gap">0</h3>
+                            <small id="kpi-gap-sub">&nbsp;</small>
                         </div>
-                    </div>
-                </div>
+                    </article>
+                </section>
 
-                <!-- Toolbar de Pesquisa -->
-                <div class="toolbar" id="toolbar-search" style="display: none;">
+                <!-- Barra de busca e filtros (só na Auditoria de PDVs) -->
+                <div class="toolbar hidden" id="toolbar-search">
                     <div class="search-box">
-                        <i class="ri-search-line"></i>
-                        <input type="text" id="tableSearch" placeholder="Query: Pesquisar por Código PDV ou Nome Fantasia...">
+                        <i class="ri-search-line" aria-hidden="true"></i>
+                        <input type="search" id="tableSearch" placeholder="Buscar por código do PDV ou nome fantasia" aria-label="Buscar PDV" autocomplete="off">
                     </div>
+                    <select id="filtroStatus" class="select" aria-label="Filtrar por status">
+                        <option value="todos">Todos os status</option>
+                        <option value="ok">OK</option>
+                        <option value="gap">Com GAP</option>
+                        <option value="vz">Venda zero</option>
+                        <option value="nok">NOK</option>
+                    </select>
+                    <button class="chip hidden" id="chipSetor" type="button" title="Remover filtro de setor"></button>
                 </div>
 
-                <!-- Main Split View -->
-                <div class="main-split-view">
-                    
-                    <!-- Container da Tabela Dinâmica -->
+                <!-- Split view -->
+                <div class="main-split-view solo" id="splitView">
+
                     <div class="table-card">
                         <div class="table-responsive">
                             <table id="masterTable">
-                                <thead id="tableHead">
-                                    <tr>
-                                        <th>Setor</th>
-                                        <th>Representante / Dono</th>
-                                        <th>TT Equipamentos</th>
-                                        <th>TT Giro OK</th>
-                                        <th>Atingimento (%)</th>
-                                        <th class="text-right">GAP de Equipamentos</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="tableBody">
-                                    <tr>
-                                        <td colspan="6" class="empty-state">
-                                            <i class="ri-file-excel-line"></i>
-                                            <p>Carregue o ficheiro mestre Excel para gerar a Visão Gerencial e os relatórios operacionais.</p>
-                                        </td>
-                                    </tr>
-                                </tbody>
+                                <thead id="tableHead"></thead>
+                                <tbody id="tableBody"></tbody>
                             </table>
+                        </div>
+                        <div class="table-footer hidden" id="tableFooter">
+                            <span id="tableCount"></span>
+                            <button class="action-sm hidden" id="btnMais" type="button">Mostrar mais</button>
                         </div>
                     </div>
 
-                    <!-- Painel Lateral de Raio-X -->
-                    <div class="side-detail-card" id="sideDetail">
+                    <!-- Painel lateral: Query Inspector / Raio-X -->
+                    <aside class="side-detail-card hidden" id="sideDetail" aria-label="Raio-X do PDV">
                         <div class="detail-header">
-                            <h3>Query Inspector / Raio-X</h3>
+                            <h3>Raio-X do PDV</h3>
                             <span class="pdv-tag" id="det-id">---</span>
                         </div>
                         <div class="detail-body" id="det-content">
-                            <p class="text-muted">Selecione "Auditar" em qualquer linha da aba de PDVs para carregar os dados financeiros e de faturamento.</p>
+                            <p class="text-muted">Clique em "Auditar" em qualquer linha para ver os dados do PDV, o faturamento e a pauta de cobrança.</p>
                         </div>
                         <div class="detail-chart-wrapper hidden" id="chartContainer">
-                            <canvas id="pdvChart"></canvas>
+                            <canvas id="pdvChart" aria-label="Curva de cobertura de SKU (simulada)" role="img"></canvas>
                         </div>
-                    </div>
+                        <p class="chart-note hidden" id="chartNote">Curva ilustrativa: ainda não usa histórico real do arquivo.</p>
+                    </aside>
 
                 </div>
-
             </div>
         </main>
     </div>
 
-    <!-- Loading Overlay -->
-    <div id="loadingOverlay" class="loading-overlay hidden">
+    <!-- Solte o arquivo em qualquer lugar -->
+    <div class="drop-hint hidden" id="dropHint"><div><i class="ri-upload-cloud-2-line" aria-hidden="true"></i><p>Solte o arquivo para carregar</p></div></div>
+
+    <!-- Overlay de carregamento -->
+    <div id="loadingOverlay" class="loading-overlay hidden" role="alertdialog" aria-live="polite" aria-labelledby="loadingTitle">
         <div class="loader-box">
-            <i class="ri-loader-4-line ri-spin"></i>
-            <h2>Processando Base Consolidada...</h2>
-            <p>Descodificando múltiplas abas operacionais (.xlsm)</p>
+            <i class="ri-loader-4-line ri-spin" aria-hidden="true"></i>
+            <h2 id="loadingTitle">Processando base consolidada...</h2>
+            <p id="loadingText">Lendo o arquivo</p>
+            <div class="progress"><div class="progress-bar" id="loadingBar"></div></div>
         </div>
     </div>
+
+    <!-- Diagnóstico da ingestão -->
+    <div id="diagModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="diagTitle">
+        <div class="modal-card">
+            <div class="modal-head">
+                <h3 id="diagTitle">Diagnóstico da ingestão</h3>
+                <button class="icon-btn" id="diagClose" type="button" aria-label="Fechar">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="diag-top">
+                    <label class="field">
+                        <span>Aba lida</span>
+                        <select id="diagSheet" class="select"></select>
+                    </label>
+                    <p id="diagInfo" class="text-muted"></p>
+                </div>
+
+                <h4>Colunas usadas</h4>
+                <p class="text-muted small">A detecção é automática. Se algum campo estiver errado, escolha a coluna certa: a escolha fica salva neste navegador e vale para os próximos arquivos.</p>
+                <div class="table-responsive diag-scroll">
+                    <table class="diag-table">
+                        <thead><tr><th>Campo</th><th>Coluna no arquivo</th><th>Exemplo</th></tr></thead>
+                        <tbody id="diagMap"></tbody>
+                    </table>
+                </div>
+
+                <h4>Como cada status foi classificado</h4>
+                <div class="table-responsive diag-scroll">
+                    <table class="diag-table">
+                        <thead><tr><th>Valor na coluna de status</th><th>Classificação</th><th class="text-right">Linhas</th></tr></thead>
+                        <tbody id="diagStatus"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-foot">
+                <button class="ghost-btn" id="diagReset" type="button">Restaurar detecção automática</button>
+                <button class="upload-btn" id="diagOk" type="button">Fechar</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
     <script src="script.js"></script>
 </body>
