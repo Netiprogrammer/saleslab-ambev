@@ -1,216 +1,204 @@
 <!DOCTYPE html>
-<html lang="pt-BR" data-theme="dark">
+<html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SalesLab Ops | Central Executiva Ambev</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SalesLab · Ambev — Command Center Operacional</title>
+<meta name="description" content="Painel operacional 100% client-side para consolidação de equipamentos, faturamento e status de SKUs por PDV." />
 
-    <!-- Aplica o tema salvo antes da primeira pintura (evita "flash" claro/escuro) -->
-    <script>
-        try { document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark'); } catch (e) {}
-    </script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/remixicon@4.5.0/fonts/remixicon.css">
+<link rel="stylesheet" href="style.css">
 
-    <link rel="stylesheet" href="style.css">
-
-    <!-- Ícones e fonte são opcionais: se a rede bloquear, o app continua funcionando.
-         SheetJS e Chart.js são carregados pelo script.js (primeiro de vendor/, depois da CDN). -->
-    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  // Carrega bibliotecas de vendor/ primeiro (rede corporativa restrita); só usa CDN se o arquivo local não existir.
+  function carregarComFallback(local, cdn, existeGlobal) {
+    return new Promise((resolve) => {
+      if (existeGlobal()) return resolve();
+      const s1 = document.createElement('script');
+      s1.src = local;
+      s1.onload = resolve;
+      s1.onerror = () => {
+        const s2 = document.createElement('script');
+        s2.src = cdn;
+        s2.onload = resolve;
+        s2.onerror = resolve; // resolve mesmo assim; o app avisa via toast se a lib não carregou
+        document.head.appendChild(s2);
+      };
+      document.head.appendChild(s1);
+    });
+  }
+  window.bibliotecasProntas = Promise.all([
+    carregarComFallback('vendor/xlsx.full.min.js', 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js', () => window.XLSX),
+    carregarComFallback('vendor/chart.umd.min.js', 'https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js', () => window.Chart),
+  ]);
+</script>
 </head>
 <body>
-    <div class="app-layout">
+<div class="app-shell">
 
-        <!-- Sidebar -->
-        <nav class="sidebar" aria-label="Navegação principal">
-            <div class="sidebar-header">
-                <div class="brand">
-                    <i class="ri-hexagon-fill" aria-hidden="true"></i>
-                    <span>SalesLab <b>Ambev</b></span>
-                </div>
-            </div>
+  <header class="app-header">
+    <div class="brand"><i class="ri-radar-line"></i> SalesLab · Ambev</div>
 
-            <div class="sidebar-menu">
-                <span class="menu-label">Módulos operacionais</span>
-                <a href="#" class="nav-link active" data-view="gerencial"><i class="ri-pie-chart-2-line" aria-hidden="true"></i> Visão gerencial</a>
-                <a href="#" class="nav-link" data-view="pdvs"><i class="ri-store-2-line" aria-hidden="true"></i> Auditoria de PDVs</a>
+    <div class="header-actions">
+      <span id="statusBadge" class="status-badge">Aguardando Base</span>
+      <input type="file" id="fileInput" accept=".xlsx,.xlsm,.xls" hidden>
+      <button id="btnUpload" class="btn btn-primary"><i class="ri-upload-2-line"></i> Carregar Base Mestre (26MB)</button>
+      <button id="btnDiagnostico" class="btn"><i class="ri-stethoscope-line"></i> Diagnóstico</button>
+      <button id="btnTheme" class="btn btn-icon" title="Alternar tema" aria-label="Alternar tema claro/escuro">
+        <i id="iconeTema" class="ri-sun-line"></i>
+      </button>
+    </div>
+  </header>
 
-                <span class="menu-label mt-4">Integrações</span>
-                <span class="nav-link disabled" aria-disabled="true"><i class="ri-robot-line" aria-hidden="true"></i> Copilot Studio <span class="badge-soon">Em breve</span></span>
-                <span class="nav-link disabled" aria-disabled="true"><i class="ri-flow-chart" aria-hidden="true"></i> Power Automate <span class="badge-soon">Em breve</span></span>
-            </div>
+  <nav class="sidebar">
+    <button class="nav-btn ativo" data-view="gerencial" id="navGerencial" disabled>
+      <i class="ri-bar-chart-grouped-line"></i> Visão Gerencial
+    </button>
+    <button class="nav-btn" data-view="auditoria" id="navAuditoria" disabled>
+      <i class="ri-search-eye-line"></i> Auditoria de PDVs
+    </button>
+  </nav>
 
-            <div class="sidebar-footer">
-                <div class="user-profile">
-                    <div class="avatar" aria-hidden="true">JN</div>
-                    <div class="user-details">
-                        <strong>João Neto</strong>
-                        <span>Engenharia de Dados</span>
-                    </div>
-                </div>
-            </div>
-        </nav>
+  <main class="app-main">
 
-        <!-- Área principal -->
-        <main class="workspace">
-            <header class="topbar">
-                <div class="topbar-left">
-                    <h2 id="view-title">Visão gerencial consolidada</h2>
-                    <span class="status-badge" id="file-status" role="status"><span class="dot red"></span> Aguardando arquivo mestre (.xlsm, .xlsx ou .xls)</span>
-                </div>
-
-                <div class="topbar-right">
-                    <button class="theme-toggle" id="theme-toggle" title="Alternar tema" aria-label="Alternar tema"><i class="ri-moon-line" aria-hidden="true"></i></button>
-                    <button class="ghost-btn" id="btn-diag" disabled title="Ver como o arquivo foi lido e ajustar colunas"><i class="ri-settings-3-line" aria-hidden="true"></i> Diagnóstico</button>
-                    <button class="upload-btn" id="btn-upload" type="button"><i class="ri-file-excel-2-line" aria-hidden="true"></i> Carregar arquivo mestre</button>
-                    <input type="file" id="excelFileInput" accept=".xlsx,.xlsm,.xls" class="hidden">
-                </div>
-            </header>
-
-            <div class="dashboard-content">
-
-                <!-- KPIs globais -->
-                <section class="kpi-grid" aria-label="Indicadores globais">
-                    <article class="kpi-card">
-                        <div class="kpi-icon blue"><i class="ri-fridge-line" aria-hidden="true"></i></div>
-                        <div class="kpi-info">
-                            <span>Total de equipamentos</span>
-                            <h3 id="kpi-total">0</h3>
-                            <small id="kpi-total-sub">registros na base</small>
-                        </div>
-                    </article>
-                    <article class="kpi-card">
-                        <div class="kpi-icon green"><i class="ri-checkbox-circle-line" aria-hidden="true"></i></div>
-                        <div class="kpi-info">
-                            <span>Giro OK (aderentes)</span>
-                            <h3 id="kpi-ok">0</h3>
-                            <small id="kpi-ok-sub">&nbsp;</small>
-                        </div>
-                    </article>
-                    <article class="kpi-card">
-                        <div class="kpi-icon orange"><i class="ri-error-warning-line" aria-hidden="true"></i></div>
-                        <div class="kpi-info">
-                            <span>Venda zero / NOK</span>
-                            <h3 id="kpi-vz">0</h3>
-                            <small id="kpi-vz-sub">&nbsp;</small>
-                        </div>
-                    </article>
-                    <article class="kpi-card">
-                        <div class="kpi-icon red"><i class="ri-alert-line" aria-hidden="true"></i></div>
-                        <div class="kpi-info">
-                            <span>GAPs críticos de SKU</span>
-                            <h3 id="kpi-gap">0</h3>
-                            <small id="kpi-gap-sub">&nbsp;</small>
-                        </div>
-                    </article>
-                </section>
-
-                <!-- Barra de busca e filtros (só na Auditoria de PDVs) -->
-                <div class="toolbar hidden" id="toolbar-search">
-                    <div class="search-box">
-                        <i class="ri-search-line" aria-hidden="true"></i>
-                        <input type="search" id="tableSearch" placeholder="Buscar por código do PDV ou nome fantasia" aria-label="Buscar PDV" autocomplete="off">
-                    </div>
-                    <select id="filtroStatus" class="select" aria-label="Filtrar por status">
-                        <option value="todos">Todos os status</option>
-                        <option value="ok">OK</option>
-                        <option value="gap">Com GAP</option>
-                        <option value="vz">Venda zero</option>
-                        <option value="nok">NOK</option>
-                    </select>
-                    <button class="chip hidden" id="chipSetor" type="button" title="Remover filtro de setor"></button>
-                </div>
-
-                <!-- Split view -->
-                <div class="main-split-view solo" id="splitView">
-
-                    <div class="table-card">
-                        <div class="table-responsive">
-                            <table id="masterTable">
-                                <thead id="tableHead"></thead>
-                                <tbody id="tableBody"></tbody>
-                            </table>
-                        </div>
-                        <div class="table-footer hidden" id="tableFooter">
-                            <span id="tableCount"></span>
-                            <button class="action-sm hidden" id="btnMais" type="button">Mostrar mais</button>
-                        </div>
-                    </div>
-
-                    <!-- Painel lateral: Query Inspector / Raio-X -->
-                    <aside class="side-detail-card hidden" id="sideDetail" aria-label="Raio-X do PDV">
-                        <div class="detail-header">
-                            <h3>Raio-X do PDV</h3>
-                            <span class="pdv-tag" id="det-id">---</span>
-                        </div>
-                        <div class="detail-body" id="det-content">
-                            <p class="text-muted">Clique em "Auditar" em qualquer linha para ver os dados do PDV, o faturamento e a pauta de cobrança.</p>
-                        </div>
-                        <div class="detail-chart-wrapper hidden" id="chartContainer">
-                            <canvas id="pdvChart" aria-label="Curva de cobertura de SKU (simulada)" role="img"></canvas>
-                        </div>
-                        <p class="chart-note hidden" id="chartNote">Curva ilustrativa: ainda não usa histórico real do arquivo.</p>
-                    </aside>
-
-                </div>
-            </div>
-        </main>
+    <div id="emptyState" class="empty-state">
+      <i class="ri-file-excel-2-line"></i>
+      <p>Carregue a base mestre (.xlsx/.xlsm/.xls) para começar. Nada é enviado para a internet — tudo roda na memória do seu navegador.</p>
     </div>
 
-    <!-- Solte o arquivo em qualquer lugar -->
-    <div class="drop-hint hidden" id="dropHint"><div><i class="ri-upload-cloud-2-line" aria-hidden="true"></i><p>Solte o arquivo para carregar</p></div></div>
+    <section class="kpi-grid" aria-label="Indicadores globais">
+      <div class="kpi-card">
+        <span class="kpi-label">Total de Equipamentos</span>
+        <span class="kpi-value" id="kpiTotalEquip">0</span>
+      </div>
+      <div class="kpi-card kpi-ok">
+        <span class="kpi-label">Giro OK</span>
+        <span class="kpi-value" id="kpiGiroOk">0</span>
+      </div>
+      <div class="kpi-card kpi-danger">
+        <span class="kpi-label">Venda Zero / NOK</span>
+        <span class="kpi-value" id="kpiVendaZero">0</span>
+      </div>
+      <div class="kpi-card kpi-warning">
+        <span class="kpi-label">GAPs Críticos SKU</span>
+        <span class="kpi-value" id="kpiGapsSku">0</span>
+      </div>
+    </section>
 
-    <!-- Overlay de carregamento -->
-    <div id="loadingOverlay" class="loading-overlay hidden" role="alertdialog" aria-live="polite" aria-labelledby="loadingTitle">
-        <div class="loader-box">
-            <i class="ri-loader-4-line ri-spin" aria-hidden="true"></i>
-            <h2 id="loadingTitle">Processando base consolidada...</h2>
-            <p id="loadingText">Lendo o arquivo</p>
-            <div class="progress"><div class="progress-bar" id="loadingBar"></div></div>
-        </div>
+    <!-- Visão 1: Gerencial Consolidada -->
+    <section class="view ativa" data-view="gerencial">
+      <div class="view-header">
+        <h2>Visão Gerencial Consolidada</h2>
+        <span class="contador">Ordenado do pior para o melhor atingimento</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Setor</th><th>Responsável</th><th>TT Equip.</th><th>TT Giro OK</th>
+              <th>Atingimento</th><th>%</th><th>GAPs</th>
+            </tr>
+          </thead>
+          <tbody id="gerencialBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Visão 2: Auditoria de PDVs -->
+    <section class="view" data-view="auditoria">
+      <div class="view-header">
+        <h2>Auditoria de PDVs</h2>
+        <span class="filtro-setor" hidden>
+          Setor: <strong id="filtroSetorAtivo"></strong>
+          <button id="btnLimparFiltroSetor" aria-label="Limpar filtro de setor">×</button>
+        </span>
+      </div>
+      <div class="toolbar">
+        <input type="search" id="searchInput" class="input-search" placeholder="Buscar por nome ou código do PDV...">
+        <select id="statusFilter" class="select-status">
+          <option value="todos">Todos os status</option>
+          <option value="OK">Giro OK</option>
+          <option value="NOK">Venda Zero / NOK</option>
+          <option value="OUTRO">Outro / Sem status</option>
+        </select>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>PDV</th><th>Nome</th><th>Setor</th><th>Status Geral</th><th>Status SKU</th><th>Ação</th></tr>
+          </thead>
+          <tbody id="auditoriaBody"></tbody>
+        </table>
+      </div>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <span class="contador" id="contadorAuditoria">Mostrando 0 de 0 PDVs</span>
+        <button id="btnMostrarMais" class="btn" hidden>Mostrar mais</button>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- Painel Raio-X -->
+<div id="overlayRaioX" class="overlay-raiox" hidden></div>
+<aside id="painelRaioX" class="painel-raiox" aria-label="Raio-X do PDV">
+  <div class="painel-raiox-header">
+    <div>
+      <h3 id="raioXNome">—</h3>
+      <p>PDV <span id="raioXPdv">—</span></p>
     </div>
+    <button id="btnFecharRaioX" class="btn btn-icon" aria-label="Fechar"><i class="ri-close-line"></i></button>
+  </div>
 
-    <!-- Diagnóstico da ingestão -->
-    <div id="diagModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="diagTitle">
-        <div class="modal-card">
-            <div class="modal-head">
-                <h3 id="diagTitle">Diagnóstico da ingestão</h3>
-                <button class="icon-btn" id="diagClose" type="button" aria-label="Fechar">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="diag-top">
-                    <label class="field">
-                        <span>Aba lida</span>
-                        <select id="diagSheet" class="select"></select>
-                    </label>
-                    <p id="diagInfo" class="text-muted"></p>
-                </div>
+  <dl class="raiox-grid">
+    <div><dt>Setor</dt><dd id="raioXSetor">—</dd></div>
+    <div><dt>Responsável</dt><dd id="raioXResponsavel">—</dd></div>
+    <div><dt>Status Geral</dt><dd id="raioXStatusGeral">—</dd></div>
+    <div><dt>Status SKU</dt><dd id="raioXStatusSku">—</dd></div>
+  </dl>
 
-                <h4>Colunas usadas</h4>
-                <p class="text-muted small">A detecção é automática. Se algum campo estiver errado, escolha a coluna certa: a escolha fica salva neste navegador e vale para os próximos arquivos.</p>
-                <div class="table-responsive diag-scroll">
-                    <table class="diag-table">
-                        <thead><tr><th>Campo</th><th>Coluna no arquivo</th><th>Exemplo</th></tr></thead>
-                        <tbody id="diagMap"></tbody>
-                    </table>
-                </div>
+  <div class="raiox-fat">
+    <div><div class="label">Faturamento Esperado</div><div class="valor" id="raioXFatEsperado">R$ 0,00</div></div>
+    <div><div class="label">Faturamento Real</div><div class="valor" id="raioXFatReal">R$ 0,00</div></div>
+  </div>
 
-                <h4>Como cada status foi classificado</h4>
-                <div class="table-responsive diag-scroll">
-                    <table class="diag-table">
-                        <thead><tr><th>Valor na coluna de status</th><th>Classificação</th><th class="text-right">Linhas</th></tr></thead>
-                        <tbody id="diagStatus"></tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="modal-foot">
-                <button class="ghost-btn" id="diagReset" type="button">Restaurar detecção automática</button>
-                <button class="upload-btn" id="diagOk" type="button">Fechar</button>
-            </div>
-        </div>
+  <div class="chart-wrap"><canvas id="chartRaioX"></canvas></div>
+  <p class="aviso-ilustrativo">Curva de cobertura ilustrativa (simulada, estável por PDV).</p>
+
+  <button id="btnCopiarPauta" class="btn btn-primary"><i class="ri-file-copy-2-line"></i> Copiar Pauta p/ Teams</button>
+</aside>
+
+<!-- Modal Diagnóstico -->
+<div id="diagnosticoModal" class="modal-overlay" hidden>
+  <div class="modal-card">
+    <h3>Diagnóstico de Mapeamento</h3>
+    <div id="diagnosticoCorpo"></div>
+    <div class="modal-actions">
+      <button id="btnFecharDiagnostico" class="btn">Fechar</button>
+      <button id="btnSalvarDiagnostico" class="btn btn-primary">Salvar e reprocessar</button>
     </div>
+  </div>
+</div>
 
-    <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+<!-- Modal texto (fallback de cópia manual) -->
+<div id="modalTexto" class="modal-overlay" hidden>
+  <div class="modal-card">
+    <h3>Copie o texto abaixo</h3>
+    <textarea id="modalTextoArea" readonly></textarea>
+    <div class="modal-actions">
+      <button id="btnFecharModalTexto" class="btn btn-primary">Fechar</button>
+    </div>
+  </div>
+</div>
 
-    <script src="script.js"></script>
+<div id="loadingOverlay" hidden>
+  <div class="spinner"></div>
+  <p id="loadingMensagem">Descodificando matrizes binárias na RAM...</p>
+</div>
+
+<div id="toastContainer" aria-live="polite"></div>
+
+<script src="script.js"></script>
 </body>
 </html>
