@@ -34,27 +34,45 @@ Invoke-WebRequest -Uri "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.fu
 Invoke-WebRequest -Uri "https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" -OutFile "vendor/chart.umd.min.js"
 ```
 
-## Como o ETL lê a planilha
+## Como o ETL lê a planilha (múltiplas abas, não só uma)
 
-1. **Seleção de aba**: procura por abas cujo nome contenha `BI DE EQUIPAMENTOS`,
-   `VISIBILIDADE` ou `SKU-PDV`; usa `VISÃO GERENCIAL` como apoio; senão, a primeira aba.
-2. **Cabeçalho inteligente**: varre as 15 primeiras linhas e usa a primeira que
-   contiver pelo menos duas das palavras `PDV`, `STATUS`, `SETOR` — ignora
-   linhas de título/data acima do cabeçalho real.
-3. **Fuzzy matching sem depender de ordem**: cada campo (PDV, Nome, Setor,
-   Responsável, Status Geral, Status SKU, Faturamento Real/Esperado) tem uma
-   lista de palavras-chave por prioridade. Todas as combinações campo×coluna são
-   pontuadas e a atribuição é feita globalmente (maior prioridade e match mais
-   específico vencem primeiro), então uma coluna como "Status PDV" não rouba a
-   coluna de código do PDV só por conter a substring "PDV".
-4. **Linha de TOTAL** é descartada automaticamente.
+O app não escolhe "a melhor aba" e ignora o resto — ele lê **todas as abas
+relevantes** e mescla os dados por PDV, porque numa base real (BI corporativo)
+a informação vem espalhada: uma aba tem o status, outra tem o faturamento,
+outra tem o responsável.
 
-Se a detecção automática errar, use o botão **Diagnóstico** no cabeçalho: ele
-mostra qual coluna foi usada para cada campo (com uma amostra de valores reais
-lidos, pra você confirmar sem precisar abrir a planilha) e permite trocar
-manualmente — a escolha fica salva no navegador (`localStorage`) e é reaplicada
-em cargas futuras. Se o cabeçalho não for identificado com confiança, um aviso
-aparece tanto no Diagnóstico quanto em toast.
+1. **Seleção de abas**: qualquer aba cujo nome contenha `BI DE EQUIPAMENTOS`,
+   `VISIBILIDADE` ou `SKU-PDV` entra na leitura "geral" (Giro/SKU por PDV); uma
+   aba com `CHOPEIRA` no nome entra como uma dimensão extra (equipamento de
+   chope, com status/meta/faturamento próprios). Se nenhuma aba "geral" for
+   encontrada, cai no fallback `VISÃO GERENCIAL` ou na primeira aba do arquivo.
+2. **Cabeçalho inteligente** (por aba): varre as 15 primeiras linhas e usa a
+   primeira que contiver pelo menos duas das palavras `PDV`, `STATUS`, `SETOR`
+   — ignora linhas de título/data acima do cabeçalho real.
+3. **Fuzzy matching sem depender de ordem** (por aba): cada campo tem uma lista
+   de palavras-chave por prioridade; todas as combinações campo×coluna são
+   pontuadas e a atribuição é feita globalmente, então uma coluna como "Status
+   PDV" não rouba a coluna de código do PDV só por conter a substring "PDV".
+4. **Mesclagem por PDV**: as abas "geral" são processadas em ordem de
+   prioridade (`BI DE EQUIPAMENTOS` → `VISIBILIDADE` → `SKU-PDV`) e cada campo
+   é preenchido pela **primeira** aba que realmente tiver aquela coluna — uma
+   aba processada depois só completa o que falta, nunca sobrescreve um valor
+   (inclusive zero legítimo, tipo "Faturamento Real = 0" numa Venda Zero) que
+   uma aba melhor já preencheu. A aba de Chopeira entra como campos extras
+   (`statusChopeira`, `faturamentoChopeira`, `metaChopeira`, `gapChopeira`),
+   mostrados no Raio-X só quando aquele PDV tiver esse dado.
+5. **Linha de TOTAL** é descartada automaticamente em cada aba.
+6. **Números lidos direto da célula**, não do texto formatado — evita que uma
+   coluna sem casas decimais ou com separador de milhar arredonde ou distorça
+   o valor real (ver Limitações abaixo pra mais contexto).
+
+Abra o botão **Diagnóstico** no cabeçalho pra ver, aba por aba: qual coluna foi
+usada em cada campo, uma amostra de valores reais lidos (pra confirmar sem
+abrir a planilha), e quantos PDVs vieram de mais de uma aba. Dá pra trocar
+manualmente o mapeamento de qualquer campo em qualquer aba — só o que você
+realmente mudar vira override salvo (`localStorage`); o resto continua se
+adaptando automaticamente na próxima carga. Se o cabeçalho de alguma aba não
+for identificado com confiança, um aviso aparece no Diagnóstico e em toast.
 
 ## Arquitetura: Web Worker + PWA offline
 
@@ -88,4 +106,15 @@ aparece tanto no Diagnóstico quanto em toast.
   reflete histórico real — não há coluna de série mensal mapeada ainda.
 - A tabela de Auditoria renderiza no máximo 200 linhas por vez (botão
   "Mostrar mais" carrega mais) para não travar a DOM em bases grandes.
+- **Arquivos grandes/complexos (dezenas de MB, muitas abas) podem levar de 20
+  a 30 segundos pra processar.** Isso é o custo real de descompactar o arquivo
+  e ler a tabela de strings compartilhadas do Excel (inerente ao formato, não
+  dá pra pular) — mas a interface não trava nesse tempo (roda num Web Worker) e
+  o overlay mostra o progresso por etapa/aba em vez de parecer travado.
+- **Se a mesma aba tiver o PDV repetido em mais de uma linha** (ex.: duas
+  "tabelas" coladas lado a lado na mesma aba, ou uma exportação com histórico
+  de vários meses), o app mantém os valores da **primeira ocorrência** e ignora
+  as demais para aquele PDV — não tenta adivinhar qual linha é "a certa". Se a
+  sua base tiver esse padrão, mais vale limpar a aba de origem do que confiar
+  no comportamento automático.
 - Arquivo público: **não commite planilhas reais** (veja `.gitignore`).
