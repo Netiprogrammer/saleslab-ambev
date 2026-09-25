@@ -5,7 +5,7 @@
  * sem rede nenhuma (depois da primeira visita), reforçando a proposta 100% client-side.
  * Sobe a versão do CACHE_NAME sempre que mudar algum arquivo do app shell.
  */
-const CACHE_NAME = 'saleslab-ambev-v1';
+const CACHE_NAME = 'saleslab-ambev-v2';
 
 const ARQUIVOS_APP = [
   'index.html',
