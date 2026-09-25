@@ -14,7 +14,7 @@ const APP_CONFIG = {
   kpiSnapshotStorageKey: 'saleslab_kpi_snapshot',
 };
 
-const ROTULOS_CAMPO = {
+const ROTULOS_CAMPO_GERAL = {
   pdv: 'Código do PDV',
   nome: 'Nome / Razão Social',
   setor: 'Setor / GV',
@@ -25,11 +25,21 @@ const ROTULOS_CAMPO = {
   faturamentoEsperado: 'Faturamento Esperado',
 };
 
+const ROTULOS_CAMPO_CHOPEIRA = {
+  pdv: 'Código do PDV',
+  nome: 'Nome / Razão Social',
+  setor: 'Setor / GV',
+  responsavel: 'Responsável',
+  statusChopeira: 'Status Chopeira',
+  faturamentoChopeira: 'Faturamento Chopeira',
+  metaChopeira: 'Meta Chopeira',
+  gapChopeira: 'GAP Chopeira',
+};
+
 const ETAPAS_LOADING = {
-  lendo: 'Lendo o arquivo...',
-  'detectando-aba': 'Detectando a aba correta...',
-  'mapeando-colunas': 'Mapeando colunas e montando registros...',
-  'processando-linhas': null, // mensagem dinâmica (mostra progresso de linhas)
+  lendo: 'Descompactando e lendo o arquivo... (arquivos grandes/complexos podem levar 20-30s)',
+  'detectando-abas': 'Detectando as abas relevantes...',
+  'processando-linhas': null, // mensagem dinâmica (mostra progresso de linhas por aba)
   'calculando-indicadores': 'Calculando KPIs e agrupamentos por setor...',
 };
 
@@ -250,9 +260,12 @@ function renderAuditoria() {
 
   visiveis.forEach((r) => {
     const classe = classificarGeral(r.statusGeral);
+    const nomeCelula = r.statusChopeira
+      ? [r.nome || '—', ' ', el('i', { class: 'ri-goblet-line icone-chopeira', title: 'Possui dados de Chopeira', 'aria-hidden': 'true' })]
+      : (r.nome || '—');
     const tr = el('tr', {}, [
       el('td', {}, r.pdv || '—'),
-      el('td', {}, r.nome || '—'),
+      el('td', {}, nomeCelula),
       el('td', {}, r.setor),
       el('td', {}, badgeStatus(classe, r.statusGeral)),
       el('td', {}, r.statusSku || '—'),
@@ -332,6 +345,21 @@ function abrirRaioX(registro) {
   document.getElementById('raioXStatusSku').textContent = registro.statusSku || '—';
   document.getElementById('raioXFatEsperado').textContent = formatMoeda(registro.faturamentoEsperado);
   document.getElementById('raioXFatReal').textContent = formatMoeda(registro.faturamentoReal);
+
+  const temChopeira = Boolean(registro.statusChopeira);
+  document.getElementById('raioXChopeira').hidden = !temChopeira;
+  if (temChopeira) {
+    document.getElementById('raioXStatusChopeira').textContent = registro.statusChopeira || '—';
+    document.getElementById('raioXMetaChopeira').textContent = formatMoeda(registro.metaChopeira);
+    document.getElementById('raioXFatChopeira').textContent = formatMoeda(registro.faturamentoChopeira);
+    document.getElementById('raioXGapChopeira').textContent = formatMoeda(registro.gapChopeira);
+  }
+
+  const fontesEl = document.getElementById('raioXFontes');
+  fontesEl.textContent = registro.fontes && registro.fontes.length
+    ? `Dados combinados de: ${registro.fontes.join(', ')}`
+    : '';
+
   renderGraficoRaioX(registro);
   document.getElementById('painelRaioX').classList.add('aberto');
   document.getElementById('overlayRaioX').hidden = false;
@@ -435,37 +463,18 @@ function fecharModalTexto() {
 // DIAGNÓSTICO DE MAPEAMENTO (permite corrigir a coluna escolhida por campo)
 // ---------------------------------------------------------------------------
 
-function abrirDiagnostico() {
-  const modal = document.getElementById('diagnosticoModal');
-  const corpo = document.getElementById('diagnosticoCorpo');
-  corpo.textContent = '';
-
-  if (!state.diagnostico) {
-    corpo.appendChild(el('p', { class: 'vazio' }, 'Carregue uma planilha para ver o diagnóstico de mapeamento.'));
-    modal.hidden = false;
-    ativarFocusTrap(modal.querySelector('.modal-card'));
-    return;
-  }
-
-  const { nomeAba, linhaCabecalho, headers, mapa, amostras, confiancaCabecalho } = state.diagnostico;
-  corpo.appendChild(el('p', {}, [el('strong', {}, 'Aba usada: '), nomeAba]));
-  corpo.appendChild(el('p', {}, [el('strong', {}, 'Linha do cabeçalho: '), String(linhaCabecalho + 1)]));
-
-  if (confiancaCabecalho === 'baixa') {
-    corpo.appendChild(el('p', { class: 'aviso-diagnostico' }, [
-      el('i', { class: 'ri-error-warning-line', 'aria-hidden': 'true' }),
-      ' Não encontramos uma linha de cabeçalho com confiança — conferindo o mapeamento abaixo, corrija manualmente o que estiver errado.',
-    ]));
-  }
+function tabelaMapeamento(aba) {
+  const rotulos = aba.papel === 'chopeira' ? ROTULOS_CAMPO_CHOPEIRA : ROTULOS_CAMPO_GERAL;
+  const { mapa, amostras, headers } = aba;
 
   const tabela = el('table', { class: 'tabela-diagnostico' });
   const thead = el('thead', {}, el('tr', {}, [el('th', {}, 'Campo'), el('th', {}, 'Coluna detectada'), el('th', {}, 'Amostra'), el('th', {}, 'Trocar')]));
   const tbody = el('tbody');
 
-  Object.entries(ROTULOS_CAMPO).forEach(([campo, rotulo]) => {
+  Object.entries(rotulos).forEach(([campo, rotulo]) => {
     const colunaAtual = mapa[campo] || '(não encontrada)';
     const amostraTexto = (amostras && amostras[campo] && amostras[campo].length) ? amostras[campo].join(', ') : '—';
-    const select = el('select', { dataset: { campo } }, [
+    const select = el('select', { dataset: { aba: aba.sheetName, campo } }, [
       el('option', { value: '' }, '— manter automático —'),
       ...headers.map((h) => el('option', { value: h, ...(h === mapa[campo] ? { selected: 'selected' } : {}) }, h)),
     ]);
@@ -479,16 +488,67 @@ function abrirDiagnostico() {
 
   tabela.appendChild(thead);
   tabela.appendChild(tbody);
-  corpo.appendChild(tabela);
+  return tabela;
+}
+
+function secaoAba(aba) {
+  const secao = el('div', { class: 'diagnostico-aba' });
+  secao.appendChild(el('h4', {}, [
+    aba.sheetName,
+    ' ',
+    el('span', { class: 'tag-papel' }, aba.papel === 'chopeira' ? 'Chopeira' : 'Geral'),
+  ]));
+  secao.appendChild(el('p', { class: 'diagnostico-meta' }, [
+    `Linha do cabeçalho: ${aba.linhaCabecalho + 1} · ${aba.totalRegistros.toLocaleString('pt-BR')} linhas lidas`,
+  ]));
+  if (aba.confiancaCabecalho === 'baixa') {
+    secao.appendChild(el('p', { class: 'aviso-diagnostico' }, [
+      el('i', { class: 'ri-error-warning-line', 'aria-hidden': 'true' }),
+      ' Não encontramos uma linha de cabeçalho com confiança nesta aba — confira o mapeamento abaixo.',
+    ]));
+  }
+  secao.appendChild(tabelaMapeamento(aba));
+  return secao;
+}
+
+function abrirDiagnostico() {
+  const modal = document.getElementById('diagnosticoModal');
+  const corpo = document.getElementById('diagnosticoCorpo');
+  corpo.textContent = '';
+
+  if (!state.diagnostico || !state.diagnostico.abasProcessadas.length) {
+    corpo.appendChild(el('p', { class: 'vazio' }, 'Carregue uma planilha para ver o diagnóstico de mapeamento.'));
+    modal.hidden = false;
+    ativarFocusTrap(modal.querySelector('.modal-card'));
+    return;
+  }
+
+  const { abasProcessadas, pdvsComMultiplasFontes, totalPdvs } = state.diagnostico;
+  corpo.appendChild(el('p', {}, [
+    el('strong', {}, `${abasProcessadas.length} aba(s) usada(s) para montar ${totalPdvs.toLocaleString('pt-BR')} PDVs`),
+    `. ${pdvsComMultiplasFontes.toLocaleString('pt-BR')} deles combinam dados de mais de uma aba.`,
+  ]));
+
+  abasProcessadas.forEach((aba) => corpo.appendChild(secaoAba(aba)));
+
   modal.hidden = false;
   ativarFocusTrap(modal.querySelector('.modal-card'));
 }
 
 function salvarDiagnostico() {
+  const automaticoPorAba = {};
+  (state.diagnostico?.abasProcessadas || []).forEach((aba) => { automaticoPorAba[aba.sheetName] = aba.mapaAutomatico; });
+
   const selects = document.querySelectorAll('#diagnosticoCorpo select');
   const overrides = {};
   selects.forEach((sel) => {
-    if (sel.value) overrides[sel.dataset.campo] = sel.value;
+    const { aba, campo } = sel.dataset;
+    // Só vira override o que o usuário realmente trocou — se deixou igual à detecção
+    // automática, não precisa "prender" esse mapeamento pra próximas cargas.
+    const automatico = automaticoPorAba[aba]?.[campo];
+    if (!sel.value || sel.value === automatico) return;
+    if (!overrides[aba]) overrides[aba] = {};
+    overrides[aba][campo] = sel.value;
   });
   salvarOverrides(overrides);
   if (state.bufferAtual) {
@@ -525,11 +585,12 @@ function esconderLoading() {
   document.getElementById('loadingOverlay').hidden = true;
 }
 
-function atualizarBadge(qtd) {
+function atualizarBadge(qtd, totalAbas) {
   const badge = document.getElementById('statusBadge');
   if (qtd > 0) {
     const hora = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-    badge.textContent = `Pipeline Ativo (${qtd.toLocaleString('pt-BR')} registros) · carregado às ${hora}`;
+    const abasTexto = totalAbas ? ` · ${totalAbas} aba(s)` : '';
+    badge.textContent = `Pipeline Ativo (${qtd.toLocaleString('pt-BR')} PDVs${abasTexto}) · carregado às ${hora}`;
   } else {
     badge.textContent = 'Aguardando Base';
   }
@@ -555,7 +616,7 @@ function obterWorker() {
 
 function mensagemEtapa(msg) {
   if (msg.etapa === 'processando-linhas') {
-    return `Processando linha ${msg.atual.toLocaleString('pt-BR')} de ${msg.total.toLocaleString('pt-BR')}...`;
+    return `Aba "${msg.sheetName}" (${msg.indiceAba + 1}/${msg.totalAbas}): linha ${msg.atual.toLocaleString('pt-BR')} de ${msg.total.toLocaleString('pt-BR')}...`;
   }
   return ETAPAS_LOADING[msg.etapa] || 'Processando...';
 }
@@ -588,31 +649,28 @@ function executarIngestao(buffer, mensagemInicial) {
     if (msg.tipo === 'resultado') {
       state.registros = msg.registros;
       state.diagnostico = {
-        nomeAba: msg.nomeAba,
-        linhaCabecalho: msg.linhaCabecalho,
-        headers: msg.headers,
-        mapa: msg.mapa,
-        mapaAutomatico: msg.mapaAutomatico,
-        amostras: msg.amostras,
-        confiancaCabecalho: msg.confiancaCabecalho,
+        abasProcessadas: msg.abasProcessadas,
+        pdvsComMultiplasFontes: msg.pdvsComMultiplasFontes,
+        totalPdvs: msg.registros.length,
       };
       state.filtroSetor = null;
       document.getElementById('filtroSetorAtivo').closest('.filtro-setor').hidden = true;
 
       renderTudo(msg.kpis, msg.grupos);
-      atualizarBadge(msg.registros.length);
+      atualizarBadge(msg.registros.length, msg.abasProcessadas.length);
       habilitarNavegacao(true);
       esconderLoading();
       definirCarregando(false);
 
+      const abasComBaixaConfianca = msg.abasProcessadas.filter((a) => a.confiancaCabecalho === 'baixa');
+      const nomesAbas = msg.abasProcessadas.map((a) => a.sheetName).join(', ');
+
       if (msg.registros.length === 0) {
-        mostrarToast('Nenhum registro reconhecido nesta aba. Abra o Diagnóstico para conferir a aba e o mapeamento.', 'erro');
-      } else if (msg.confiancaCabecalho === 'baixa') {
-        mostrarToast('Cabeçalho não identificado com confiança — confira o mapeamento no Diagnóstico.', 'erro');
-      } else if (!msg.mapa.pdv && !msg.mapa.nome) {
-        mostrarToast('Não localizamos as colunas de PDV/Nome automaticamente. Corrija no Diagnóstico.', 'erro');
+        mostrarToast('Nenhum registro reconhecido nas abas encontradas. Abra o Diagnóstico para conferir.', 'erro');
+      } else if (abasComBaixaConfianca.length) {
+        mostrarToast(`Cabeçalho não identificado com confiança em: ${abasComBaixaConfianca.map((a) => a.sheetName).join(', ')}. Confira no Diagnóstico.`, 'erro');
       } else {
-        mostrarToast(`Base carregada: ${msg.registros.length.toLocaleString('pt-BR')} registros na aba "${msg.nomeAba}".`);
+        mostrarToast(`Base carregada: ${msg.registros.length.toLocaleString('pt-BR')} PDVs consolidados de ${msg.abasProcessadas.length} aba(s) (${nomesAbas}).`);
       }
     }
   };
