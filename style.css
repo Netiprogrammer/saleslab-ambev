@@ -360,6 +360,7 @@ td.vazio { text-align: center; color: var(--text-muted); padding: 30px; }
 .btn-auditar:hover { background: var(--color-accent-soft); }
 
 .contador { color: var(--text-muted); font-size: 0.8rem; margin-top: 4px; }
+.icone-chopeira { color: var(--color-accent); font-size: 0.9rem; vertical-align: middle; }
 
 /* ---------- Painel Raio-X ---------- */
 
@@ -407,6 +408,15 @@ td.vazio { text-align: center; color: var(--text-muted); padding: 30px; }
 .chart-wrap { position: relative; height: 200px; }
 .aviso-ilustrativo { font-size: 0.72rem; color: var(--text-muted); text-align: center; margin: -8px 0 0; }
 
+.raiox-chopeira {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  background: var(--bg-card);
+}
+.raiox-chopeira h4 { margin: 0 0 8px; display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--color-accent); }
+.raiox-fontes { font-size: 0.7rem; color: var(--text-muted); margin: -8px 0 0; }
+
 /* ---------- Modais / Toast / Loading ---------- */
 
 .modal-overlay {
@@ -450,6 +460,24 @@ td.vazio { text-align: center; color: var(--text-muted); padding: 30px; }
   color: var(--color-warning);
   font-size: 0.85rem;
   margin: 0 0 12px;
+}
+
+.diagnostico-aba {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  margin: 0 0 16px;
+}
+.diagnostico-aba h4 { margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+.diagnostico-meta { margin: 0 0 10px; font-size: 0.78rem; color: var(--text-muted); }
+.tag-papel {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
 }
 
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
